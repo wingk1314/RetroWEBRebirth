@@ -761,6 +761,19 @@ public:
             );
             return true;
         }
+
+        // Ctrl+Shift+V: Send current URL to VintageStreamProxy → VLC
+        if(
+            window_->state_ == Open &&
+            event.type == KEYEVENT_RAWKEYDOWN &&
+            event.windows_key_code == 'V' &&
+            (event.modifiers & EVENTFLAG_CONTROL_DOWN) &&
+            (event.modifiers & EVENTFLAG_SHIFT_DOWN)
+        ) {
+            window_->sendCurrentURLToVLC();
+            return true;
+        }
+
         return false;
     }
 
@@ -1285,6 +1298,14 @@ void Window::onOpenBookmarksButtonPressed() {
     }
 }
 
+void Window::onSendToVLCButtonPressed() {
+    REQUIRE_UI_THREAD();
+
+    if(state_ == Open) {
+        sendCurrentURLToVLC();
+    }
+}
+
 void Window::onNavigationButtonPressed(int direction) {
     REQUIRE_UI_THREAD();
 
@@ -1299,6 +1320,102 @@ void Window::onHomeButtonPressed() {
     if(state_ == Open) {
         navigateToURI(globals->config->startPage);
     }
+}
+
+void Window::sendCurrentURLToVLC() {
+    REQUIRE_UI_THREAD();
+
+    if(state_ != Open) return;
+    if(!globals->config->vlcEnabled) {
+        INFO_LOG("VLC not enabled, ignoring sendCurrentURLToVLC");
+        return;
+    }
+    if(globals->config->vlcClientIP.empty()) {
+        WARNING_LOG("VLC enabled but --vlc-client-ip not set");
+        return;
+    }
+    if(!browser_) return;
+
+    CefRefPtr<CefFrame> frame = browser_->GetMainFrame();
+    if(!frame) return;
+
+    string url = frame->GetURL();
+    if(url.empty()) {
+        WARNING_LOG("No URL to send to VLC");
+        return;
+    }
+
+    string vspServer = globals->config->vspServer;
+    if(vspServer.empty()) {
+        WARNING_LOG("VSP server not configured (--vsp-server)");
+        return;
+    }
+    if(vspServer.back() == '/') {
+        vspServer.pop_back();
+    }
+
+    // Build stream URL: try YouTube video ID first, otherwise pass full URL
+    string streamUrl;
+    optional<string> videoID = extractYouTubeVideoID(url);
+    if(videoID.has_value()) {
+        streamUrl = vspServer + "/" + globals->config->vspProfile
+                   + "?v=" + videoID.value();
+        INFO_LOG("Manual VLC: YouTube video ", videoID.value());
+    } else {
+        // Pass the full URL to VSP for non-YouTube sites
+        streamUrl = vspServer + "/" + globals->config->vspProfile
+                   + "?url=" + CefURIEncode(url, false);
+        INFO_LOG("Manual VLC: generic URL ", url);
+    }
+
+    string encodedStreamUrl = CefURIEncode(streamUrl, false);
+
+    // Build helper URL
+    string helperUrl = "http://" + globals->config->vlcClientIP + ":"
+                     + std::to_string(globals->config->vlcHelperPort)
+                     + "/vlc?streamUrl=" + encodedStreamUrl
+                     + "&timeout=" + std::to_string(globals->config->vlcTimeout);
+
+    // Fire HTTP request to helper (async, non-blocking)
+    sendHttpGetAsync(helperUrl);
+
+    // Show notification in a new popup window
+    string notifyURL = createSignedDataURL(
+        "Opening in VLC...", vlcNotificationSignKey
+    );
+
+    shared_ptr<bool> allowAcceptCall(new bool);
+    *allowAcceptCall = false;
+    bool acceptCalled = false;
+    bool popupCreated = false;
+
+    auto accept = [&, allowAcceptCall](
+        uint64_t newHandle
+    ) -> shared_ptr<Window> {
+        REQUIRE(*allowAcceptCall);
+        REQUIRE(!acceptCalled);
+        acceptCalled = true;
+
+        REQUIRE(newHandle);
+        REQUIRE(newHandle != handle_);
+
+        shared_ptr<Window> newWindow = Window::tryCreate(
+            eventHandler_, requestContext_, newHandle,
+            /*uri=*/notifyURL,
+            showSoftNavigationButtons_
+        );
+
+        if(newWindow) {
+            popupCreated = true;
+        }
+
+        return newWindow;
+    };
+
+    REQUIRE(eventHandler_);
+    *allowAcceptCall = true;
+    eventHandler_->onWindowCreatePopupRequest(handle_, accept);
+    *allowAcceptCall = false;
 }
 
 void Window::onBrowserAreaViewDirty() {
@@ -1385,6 +1502,10 @@ void Window::createSuccessful_() {
             self->handle_
         )) {
             self->rootWidget_->controlBar()->enableClipboardButton();
+        }
+
+        if(globals->config->vlcEnabled) {
+            self->rootWidget_->controlBar()->enableVLCButton();
         }
     });
 }

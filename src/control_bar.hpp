@@ -24,6 +24,7 @@ public:
     virtual void onStopFind(bool clearSelection) = 0;
     virtual void onClipboardButtonPressed() = 0;
     virtual void onOpenBookmarksButtonPressed() = 0;
+    virtual void onSendToVLCButtonPressed() = 0;
 
     // -1 = back, 0 = refresh, 1 = forward.
     virtual void onNavigationButtonPressed(int direction) = 0;
@@ -54,6 +55,7 @@ public:
 
     void enableQualitySelector(vector<string> labels, size_t choiceIdx);
     void enableClipboardButton();
+    void enableVLCButton();
 
     void setSecurityStatus(SecurityStatus value);
     void setAddress(string addr);
@@ -104,6 +106,7 @@ private:
     weak_ptr<ControlBarEventHandler> eventHandler_;
 
     bool clipboardButtonEnabled_;
+    bool vlcButtonEnabled_;
 
     bool showSoftNavigationButtons_;
 
@@ -123,6 +126,7 @@ private:
     shared_ptr<MenuButton> openBookmarksButton_;
     shared_ptr<MenuButton> findButton_;
     shared_ptr<MenuButton> clipboardButton_;
+    shared_ptr<MenuButton> vlcButton_;
 
     shared_ptr<TextLayout> qualityText_;
     shared_ptr<QualitySelector> qualitySelector_;

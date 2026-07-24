@@ -114,6 +114,9 @@ public:
     void sendKeyUpEvent(int key);
     void sendLoseFocusEvent();
 
+    // Send the current page URL to VintageStreamProxy → VLC on the client.
+    void sendCurrentURLToVLC();
+
     void zoomIn();
     void zoomOut();
     void zoomReset();
@@ -131,6 +134,7 @@ public:
     virtual void onStopFind(bool clearSelection) override;
     virtual void onClipboardButtonPressed() override;
     virtual void onOpenBookmarksButtonPressed() override;
+    virtual void onSendToVLCButtonPressed() override;
     virtual void onNavigationButtonPressed(int direction) override;
     virtual void onHomeButtonPressed() override;
 

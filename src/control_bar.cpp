@@ -471,6 +471,49 @@ MenuButtonIcon clipboardIcon = {
     )
 };
 
+vector<string> vlcIconPattern = {
+    "...................",
+    "...................",
+    "...BBBBBBBBBBBBB...",
+    "..BpppppppppppppB..",
+    "..BpPPPPPPPPPPPPpB.",
+    "..BpPPPPPPPPPPPPPpB",
+    "..BpPPPPPPPPPPPPPpB",
+    "..BpPPPPPPPPPPPPPpB",
+    "..BpPPPPPPPPPPPPPpB",
+    "..BpPPPPPPPPPPPPPpB",
+    "..BpPPPPPPPPPPPPPpB",
+    "..BpPPPPPPPPPPPPPpB",
+    "..BpPPPPPPPPPPPPpB.",
+    "..BppppppppppppppB.",
+    "...BBBBBBBBBBBBB...",
+    "...................",
+    "...................",
+    "...................",
+    "..................."
+};
+
+MenuButtonIcon vlcIcon = {
+    ImageSlice::createImageFromStrings(
+        vlcIconPattern,
+        {
+            {'.', {192, 192, 192}},
+            {'B', {0, 0, 0}},
+            {'p', {200, 50, 50}},
+            {'P', {220, 70, 70}}
+        }
+    ),
+    ImageSlice::createImageFromStrings(
+        vlcIconPattern,
+        {
+            {'.', {192, 192, 192}},
+            {'B', {0, 0, 0}},
+            {'p', {160, 40, 40}},
+            {'P', {180, 50, 50}}
+        }
+    )
+};
+
 map<char, array<uint8_t, 3>> backForwardColorPalette = {
     {'G', {192, 192, 192}},
     {'B', {0, 0, 0}},
@@ -683,6 +726,7 @@ struct ControlBar::Layout {
         int width,
         bool isQualitySelectorVisible,
         bool isClipboardButtonVisible,
+        bool isVLCButtonVisible,
         bool isDownloadVisible,
         bool isFindBarVisible,
         bool showSoftNavigationButtons
@@ -791,7 +835,14 @@ struct ControlBar::Layout {
             clipboardButtonStart = clipboardButtonEnd;
         }
 
-        findButtonEnd = clipboardButtonStart;
+        vlcButtonEnd = clipboardButtonStart;
+        if(isVLCButtonVisible) {
+            vlcButtonStart = vlcButtonEnd - BtnWidth;
+        } else {
+            vlcButtonStart = vlcButtonEnd;
+        }
+
+        findButtonEnd = vlcButtonStart;
         findButtonStart = findButtonEnd - BtnWidth;
 
         openBookmarksButtonEnd = findButtonStart;
@@ -883,6 +934,9 @@ struct ControlBar::Layout {
     int clipboardButtonStart;
     int clipboardButtonEnd;
 
+    int vlcButtonStart;
+    int vlcButtonEnd;
+
     int findTextStart;
     int findTextEnd;
 
@@ -902,6 +956,7 @@ ControlBar::ControlBar(CKey,
     eventHandler_ = eventHandler;
 
     clipboardButtonEnabled_ = false;
+    vlcButtonEnabled_ = false;
     showSoftNavigationButtons_ = showSoftNavigationButtons;
 
     animationTimeout_ = Timeout::create(30);
@@ -945,6 +1000,17 @@ void ControlBar::enableClipboardButton() {
 
     if(!clipboardButtonEnabled_) {
         clipboardButtonEnabled_ = true;
+
+        widgetViewportUpdated_();
+        signalViewDirty_();
+    }
+}
+
+void ControlBar::enableVLCButton() {
+    REQUIRE_UI_THREAD();
+
+    if(!vlcButtonEnabled_) {
+        vlcButtonEnabled_ = true;
 
         widgetViewportUpdated_();
         signalViewDirty_();
@@ -1100,6 +1166,13 @@ void ControlBar::onMenuButtonPressed(weak_ptr<MenuButton> button) {
         );
     }
 
+    if(button.lock() == vlcButton_ && vlcButtonEnabled_) {
+        postTask(
+            eventHandler_,
+            &ControlBarEventHandler::onSendToVLCButtonPressed
+        );
+    }
+
     if(button.lock() == backButton_) {
         postTask(eventHandler_, &ControlBarEventHandler::onNavigationButtonPressed, -1);
     }
@@ -1166,6 +1239,7 @@ void ControlBar::afterConstruct_(shared_ptr<ControlBar> self) {
     openBookmarksButton_ = MenuButton::create(openBookmarksIcon, self, self);
     findButton_ = MenuButton::create(findIcon, self, self);
     clipboardButton_ = MenuButton::create(clipboardIcon, self, self);
+    vlcButton_ = MenuButton::create(vlcIcon, self, self);
     downloadButton_ = Button::create(self, self);
     findBar_ = FindBar::create(self, self);
 }
@@ -1179,6 +1253,7 @@ ControlBar::Layout ControlBar::layout_() {
         getViewport().width(),
         (bool)qualitySelector_,
         clipboardButtonEnabled_,
+        vlcButtonEnabled_,
         isDownloadVisible_(),
         findBarVisible_,
         showSoftNavigationButtons_
@@ -1236,6 +1311,11 @@ void ControlBar::widgetViewportUpdated_() {
     if(clipboardButtonEnabled_) {
         clipboardButton_->setViewport(viewport.subRect(
             layout.clipboardButtonStart, layout.clipboardButtonEnd, 1, Height - 4
+        ));
+    }
+    if(vlcButtonEnabled_) {
+        vlcButton_->setViewport(viewport.subRect(
+            layout.vlcButtonStart, layout.vlcButtonEnd, 1, Height - 4
         ));
     }
     if(isDownloadVisible_()) {
@@ -1414,6 +1494,9 @@ vector<shared_ptr<Widget>> ControlBar::widgetListChildren_() {
     }
     if(clipboardButtonEnabled_) {
         children.push_back(clipboardButton_);
+    }
+    if(vlcButtonEnabled_) {
+        children.push_back(vlcButton_);
     }
     if(isDownloadVisible_()) {
         children.push_back(downloadButton_);
