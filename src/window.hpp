@@ -135,6 +135,7 @@ public:
     virtual void onClipboardButtonPressed() override;
     virtual void onOpenBookmarksButtonPressed() override;
     virtual void onSendToVLCButtonPressed() override;
+    virtual void onResolutionButtonPressed() override;
     virtual void onNavigationButtonPressed(int direction) override;
     virtual void onHomeButtonPressed() override;
 

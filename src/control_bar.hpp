@@ -25,6 +25,7 @@ public:
     virtual void onClipboardButtonPressed() = 0;
     virtual void onOpenBookmarksButtonPressed() = 0;
     virtual void onSendToVLCButtonPressed() = 0;
+    virtual void onResolutionButtonPressed() = 0;
 
     // -1 = back, 0 = refresh, 1 = forward.
     virtual void onNavigationButtonPressed(int direction) = 0;
@@ -56,6 +57,8 @@ public:
     void enableQualitySelector(vector<string> labels, size_t choiceIdx);
     void enableClipboardButton();
     void enableVLCButton();
+    void enableResolutionSelector();
+    void setResolutionText(string text);
 
     void setSecurityStatus(SecurityStatus value);
     void setAddress(string addr);
@@ -107,6 +110,7 @@ private:
 
     bool clipboardButtonEnabled_;
     bool vlcButtonEnabled_;
+    bool resolutionSelectorEnabled_;
 
     bool showSoftNavigationButtons_;
 
@@ -127,6 +131,8 @@ private:
     shared_ptr<MenuButton> findButton_;
     shared_ptr<MenuButton> clipboardButton_;
     shared_ptr<MenuButton> vlcButton_;
+    shared_ptr<MenuButton> resolutionButton_;
+    shared_ptr<TextLayout> resolutionText_;
 
     shared_ptr<TextLayout> qualityText_;
     shared_ptr<QualitySelector> qualitySelector_;

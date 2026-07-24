@@ -41,6 +41,20 @@ string toLowerASCII(string s) {
 // The per-Client vlcNotificationPageSignKey_ remains for in-window fallback.
 string vlcNotificationSignKey = generateDataURLSignKey();
 
+// Transcoding resolution options for VSP
+const vector<string> transcodeResolutions = {"144p", "240p", "360p", "480p", "720p"};
+int currentTranscodeResolutionIdx = 4; // Default: 720p
+
+string getCurrentTranscodeResolution() {
+    return transcodeResolutions[currentTranscodeResolutionIdx];
+}
+
+void cycleTranscodeResolution() {
+    currentTranscodeResolutionIdx =
+        (currentTranscodeResolutionIdx + 1) % transcodeResolutions.size();
+    INFO_LOG("Transcode resolution changed to ", getCurrentTranscodeResolution());
+}
+
 // Detect YouTube video URLs. Works with www./m. prefixes and case-insensitively.
 bool isYouTubeVideoURL(string url) {
     string lower = toLowerASCII(url);
@@ -614,8 +628,10 @@ public:
                 if(!vspServer.empty() && vspServer.back() == '/') {
                     vspServer.pop_back();
                 }
+                string resolution = getCurrentTranscodeResolution();
                 string streamUrl = vspServer + "/" + globals->config->vspProfile
-                                 + "?v=" + videoID.value();
+                                 + "?v=" + videoID.value()
+                                 + "&resolution=" + resolution;
                 string encodedStreamUrl = CefURIEncode(streamUrl, false);
 
                 // Build helper URL with timeout
@@ -1306,6 +1322,16 @@ void Window::onSendToVLCButtonPressed() {
     }
 }
 
+void Window::onResolutionButtonPressed() {
+    REQUIRE_UI_THREAD();
+
+    if(state_ == Open) {
+        cycleTranscodeResolution();
+        // Update the control bar text display
+        rootWidget_->controlBar()->setResolutionText(getCurrentTranscodeResolution());
+    }
+}
+
 void Window::onNavigationButtonPressed(int direction) {
     REQUIRE_UI_THREAD();
 
@@ -1356,16 +1382,20 @@ void Window::sendCurrentURLToVLC() {
 
     // Build stream URL: try YouTube video ID first, otherwise pass full URL
     string streamUrl;
+    string resolution = getCurrentTranscodeResolution();
     optional<string> videoID = extractYouTubeVideoID(url);
     if(videoID.has_value()) {
         streamUrl = vspServer + "/" + globals->config->vspProfile
-                   + "?v=" + videoID.value();
-        INFO_LOG("Manual VLC: YouTube video ", videoID.value());
+                   + "?v=" + videoID.value()
+                   + "&resolution=" + resolution;
+        INFO_LOG("Manual VLC: YouTube video ", videoID.value(),
+                 " at ", resolution);
     } else {
         // Pass the full URL to VSP for non-YouTube sites
         streamUrl = vspServer + "/" + globals->config->vspProfile
-                   + "?url=" + string(CefURIEncode(url, false).ToString());
-        INFO_LOG("Manual VLC: generic URL ", url);
+                   + "?url=" + string(CefURIEncode(url, false).ToString())
+                   + "&resolution=" + resolution;
+        INFO_LOG("Manual VLC: generic URL ", url, " at ", resolution);
     }
 
     string encodedStreamUrl = CefURIEncode(streamUrl, false);
@@ -1506,6 +1536,7 @@ void Window::createSuccessful_() {
 
         if(globals->config->vlcEnabled) {
             self->rootWidget_->controlBar()->enableVLCButton();
+            self->rootWidget_->controlBar()->enableResolutionSelector();
         }
     });
 }

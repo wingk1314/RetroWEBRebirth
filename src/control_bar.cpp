@@ -514,6 +514,49 @@ MenuButtonIcon vlcIcon = {
     )
 };
 
+vector<string> resIconPattern = {
+    "...................",
+    "...................",
+    "...BBBBBBBBBBBBB...",
+    "..BpppppppppppppB..",
+    "..BpPPPPPPPPPPPPpB.",
+    "..BpPPPPPPPPPPPPPpB",
+    "..BpPPPPPPPPPPPPPpB",
+    "..BpPPPPPPPPPPPPPpB",
+    "..BpPPPPPPPPPPPPPpB",
+    "..BpPPPPPPPPPPPPPpB",
+    "..BpPPPPPPPPPPPPPpB",
+    "..BpPPPPPPPPPPPPPpB",
+    "..BpPPPPPPPPPPPPpB.",
+    "..BppppppppppppppB.",
+    "...BBBBBBBBBBBBB...",
+    "...................",
+    "...................",
+    "...................",
+    "..................."
+};
+
+MenuButtonIcon resIcon = {
+    ImageSlice::createImageFromStrings(
+        resIconPattern,
+        {
+            {'.', {192, 192, 192}},
+            {'B', {0, 0, 0}},
+            {'p', {50, 150, 200}},
+            {'P', {70, 180, 230}}
+        }
+    ),
+    ImageSlice::createImageFromStrings(
+        resIconPattern,
+        {
+            {'.', {192, 192, 192}},
+            {'B', {0, 0, 0}},
+            {'p', {40, 120, 160}},
+            {'P', {50, 140, 180}}
+        }
+    )
+};
+
 map<char, array<uint8_t, 3>> backForwardColorPalette = {
     {'G', {192, 192, 192}},
     {'B', {0, 0, 0}},
@@ -727,6 +770,7 @@ struct ControlBar::Layout {
         bool isQualitySelectorVisible,
         bool isClipboardButtonVisible,
         bool isVLCButtonVisible,
+        bool isResolutionSelectorVisible,
         bool isDownloadVisible,
         bool isFindBarVisible,
         bool showSoftNavigationButtons
@@ -842,7 +886,18 @@ struct ControlBar::Layout {
             vlcButtonStart = vlcButtonEnd;
         }
 
-        findButtonEnd = vlcButtonStart;
+        resolutionButtonEnd = vlcButtonStart;
+        if(isResolutionSelectorVisible) {
+            resolutionButtonStart = resolutionButtonEnd - BtnWidth;
+            resolutionTextEnd = resolutionButtonStart;
+            resolutionTextStart = resolutionTextEnd - 40;
+        } else {
+            resolutionButtonStart = resolutionButtonEnd;
+            resolutionTextEnd = resolutionButtonEnd;
+            resolutionTextStart = resolutionButtonEnd;
+        }
+
+        findButtonEnd = resolutionTextStart;
         findButtonStart = findButtonEnd - BtnWidth;
 
         openBookmarksButtonEnd = findButtonStart;
@@ -937,6 +992,11 @@ struct ControlBar::Layout {
     int vlcButtonStart;
     int vlcButtonEnd;
 
+    int resolutionButtonStart;
+    int resolutionButtonEnd;
+    int resolutionTextStart;
+    int resolutionTextEnd;
+
     int findTextStart;
     int findTextEnd;
 
@@ -957,6 +1017,7 @@ ControlBar::ControlBar(CKey,
 
     clipboardButtonEnabled_ = false;
     vlcButtonEnabled_ = false;
+    resolutionSelectorEnabled_ = false;
     showSoftNavigationButtons_ = showSoftNavigationButtons;
 
     animationTimeout_ = Timeout::create(30);
@@ -1013,6 +1074,29 @@ void ControlBar::enableVLCButton() {
         vlcButtonEnabled_ = true;
 
         widgetViewportUpdated_();
+        signalViewDirty_();
+    }
+}
+
+void ControlBar::enableResolutionSelector() {
+    REQUIRE_UI_THREAD();
+
+    if(!resolutionSelectorEnabled_) {
+        resolutionSelectorEnabled_ = true;
+
+        resolutionText_ = TextLayout::create();
+        resolutionText_->setText("720p");
+
+        widgetViewportUpdated_();
+        signalViewDirty_();
+    }
+}
+
+void ControlBar::setResolutionText(string text) {
+    REQUIRE_UI_THREAD();
+
+    if(resolutionSelectorEnabled_ && resolutionText_) {
+        resolutionText_->setText(move(text));
         signalViewDirty_();
     }
 }
@@ -1173,6 +1257,13 @@ void ControlBar::onMenuButtonPressed(weak_ptr<MenuButton> button) {
         );
     }
 
+    if(button.lock() == resolutionButton_ && resolutionSelectorEnabled_) {
+        postTask(
+            eventHandler_,
+            &ControlBarEventHandler::onResolutionButtonPressed
+        );
+    }
+
     if(button.lock() == backButton_) {
         postTask(eventHandler_, &ControlBarEventHandler::onNavigationButtonPressed, -1);
     }
@@ -1240,6 +1331,7 @@ void ControlBar::afterConstruct_(shared_ptr<ControlBar> self) {
     findButton_ = MenuButton::create(findIcon, self, self);
     clipboardButton_ = MenuButton::create(clipboardIcon, self, self);
     vlcButton_ = MenuButton::create(vlcIcon, self, self);
+    resolutionButton_ = MenuButton::create(resIcon, self, self);
     downloadButton_ = Button::create(self, self);
     findBar_ = FindBar::create(self, self);
 }
@@ -1254,6 +1346,7 @@ ControlBar::Layout ControlBar::layout_() {
         (bool)qualitySelector_,
         clipboardButtonEnabled_,
         vlcButtonEnabled_,
+        resolutionSelectorEnabled_,
         isDownloadVisible_(),
         findBarVisible_,
         showSoftNavigationButtons_
@@ -1317,6 +1410,16 @@ void ControlBar::widgetViewportUpdated_() {
         vlcButton_->setViewport(viewport.subRect(
             layout.vlcButtonStart, layout.vlcButtonEnd, 1, Height - 4
         ));
+    }
+    if(resolutionSelectorEnabled_) {
+        resolutionButton_->setViewport(viewport.subRect(
+            layout.resolutionButtonStart, layout.resolutionButtonEnd, 1, Height - 4
+        ));
+        if(resolutionText_) {
+            resolutionText_->setViewport(viewport.subRect(
+                layout.resolutionTextStart, layout.resolutionTextEnd, 1, Height - 4
+            ));
+        }
     }
     if(isDownloadVisible_()) {
         downloadButton_->setViewport(viewport.subRect(
@@ -1497,6 +1600,12 @@ vector<shared_ptr<Widget>> ControlBar::widgetListChildren_() {
     }
     if(vlcButtonEnabled_) {
         children.push_back(vlcButton_);
+    }
+    if(resolutionSelectorEnabled_) {
+        children.push_back(resolutionButton_);
+        if(resolutionText_) {
+            children.push_back(resolutionText_);
+        }
     }
     if(isDownloadVisible_()) {
         children.push_back(downloadButton_);
