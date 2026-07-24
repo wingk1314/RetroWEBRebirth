@@ -37,6 +37,12 @@ public:
     const BrowserFontRenderMode browserFontRenderMode;
     const set<string> certificateCheckExceptions;
     const bool showControlBar;
+    const bool vlcEnabled;
+    const string vlcClientIP;
+    const int vlcHelperPort;
+    const string vspServer;
+    const string vspProfile;
+    const int vlcTimeout;
 };
 
 }

@@ -2,12 +2,14 @@
 
 #include "data_url.hpp"
 #include "globals.hpp"
+#include "http_client.hpp"
 #include "key.hpp"
 #include "root_widget.hpp"
 #include "timeout.hpp"
 #include "vice.hpp"
 
 #include "include/cef_client.h"
+#include "include/cef_parser.h"
 
 namespace browservice {
 
@@ -24,6 +26,122 @@ bool isLocalFileRequestURL(string url) {
         }
     }
     return false;
+}
+
+// Convert a string to lowercase (ASCII only).
+string toLowerASCII(string s) {
+    for(char& c : s) {
+        c = (char)tolower((unsigned char)c);
+    }
+    return s;
+}
+
+// Global sign key for VLC notification popup windows (R2).
+// Used when creating a new window to show "Opening in VLC..." notification.
+// The per-Client vlcNotificationPageSignKey_ remains for in-window fallback.
+string vlcNotificationSignKey = generateDataURLSignKey();
+
+// Detect YouTube video URLs. Works with www./m. prefixes and case-insensitively.
+bool isYouTubeVideoURL(string url) {
+    string lower = toLowerASCII(url);
+
+    // youtube.com/watch?v=...  (includes www.youtube.com, m.youtube.com)
+    if(lower.find("youtube.com/watch") != string::npos &&
+       lower.find("v=") != string::npos) {
+        return true;
+    }
+
+    // youtu.be/...
+    if(lower.find("youtu.be/") != string::npos) {
+        return true;
+    }
+
+    // youtube.com/embed/...
+    if(lower.find("youtube.com/embed/") != string::npos) {
+        return true;
+    }
+
+    return false;
+}
+
+// Check if a character is valid in a YouTube video ID ([a-zA-Z0-9_-]).
+bool isYouTubeVideoIDChar(char c) {
+    return (c >= 'a' && c <= 'z') ||
+           (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') ||
+           c == '_' || c == '-';
+}
+
+// Extract the 11-character YouTube video ID from a URL.
+// Supports youtube.com/watch?v=, youtu.be/, and youtube.com/embed/ formats.
+// Returns an empty optional if no valid 11-char ID is found.
+optional<string> extractYouTubeVideoID(string url) {
+    // Strip fragment if present
+    size_t hashPos = url.find('#');
+    if(hashPos != string::npos) {
+        url = url.substr(0, hashPos);
+    }
+
+    string lower = toLowerASCII(url);
+
+    string rawID;
+
+    // Format 1: youtube.com/watch?v=...
+    if(lower.find("youtube.com/watch") != string::npos &&
+       lower.find("v=") != string::npos) {
+        // Find "v=" (case-insensitive search in lowercased string)
+        size_t vPos = lower.find("v=");
+        size_t idStart = vPos + 2;
+        // Extract up to 11 valid ID chars, stopping at '&' or end
+        for(size_t i = 0; i < 11 && idStart + i < url.size(); ++i) {
+            char c = url[idStart + i];
+            if(c == '&') {
+                break;
+            }
+            if(!isYouTubeVideoIDChar(c)) {
+                // Invalid char encountered — reject
+                return optional<string>();
+            }
+            rawID.push_back(c);
+        }
+    }
+    // Format 2: youtu.be/<id>
+    else if(lower.find("youtu.be/") != string::npos) {
+        size_t idStart = lower.find("youtu.be/") + 9; // length of "youtu.be/"
+        for(size_t i = 0; i < 11 && idStart + i < url.size(); ++i) {
+            char c = url[idStart + i];
+            if(c == '?' || c == '&' || c == '/') {
+                break;
+            }
+            if(!isYouTubeVideoIDChar(c)) {
+                return optional<string>();
+            }
+            rawID.push_back(c);
+        }
+    }
+    // Format 3: youtube.com/embed/<id>
+    else if(lower.find("youtube.com/embed/") != string::npos) {
+        size_t idStart = lower.find("youtube.com/embed/") + 18; // length of "youtube.com/embed/"
+        for(size_t i = 0; i < 11 && idStart + i < url.size(); ++i) {
+            char c = url[idStart + i];
+            if(c == '?' || c == '&' || c == '/') {
+                break;
+            }
+            if(!isYouTubeVideoIDChar(c)) {
+                return optional<string>();
+            }
+            rawID.push_back(c);
+        }
+    } else {
+        return optional<string>();
+    }
+
+    // Validate: exactly 11 characters, all valid
+    if(rawID.size() != 11) {
+        return optional<string>();
+    }
+
+    return rawID;
 }
 
 // Adjust zoom in steps of sixth root of 2.
@@ -92,6 +210,8 @@ public:
         lastFindID_ = -1;
         certificateErrorPageSignKey_ = generateDataURLSignKey();
         fileSchemeBlockedPageSignKey_ = generateDataURLSignKey();
+        vlcNotificationPageSignKey_ = generateDataURLSignKey();
+        suppressNextVLCLoadError_ = false;  // R2: suppress notification in original window
     }
 
     // CefClient:
@@ -277,6 +397,11 @@ public:
                     "Access to files through the file:// URI scheme is blocked "
                     "(do NOT rely on this block for security, as there may be ways around it)"
                 );
+            } else if(
+                readSignedDataURL(frame->GetURL(), vlcNotificationPageSignKey_) ||
+                readSignedDataURL(frame->GetURL(), vlcNotificationSignKey)
+            ) {
+                window_->rootWidget_->browserArea()->showError("Opening in VLC...");
             } else {
                 window_->rootWidget_->browserArea()->clearError();
             }
@@ -330,6 +455,20 @@ public:
             frame->LoadURL(
                 createSignedDataURL(failedURL, fileSchemeBlockedPageSignKey_)
             );
+        } else if(
+            errorCode == ERR_ABORTED &&
+            globals->config->vlcEnabled &&
+            isYouTubeVideoURL(failedURL)
+        ) {
+            if(suppressNextVLCLoadError_) {
+                // R2: Notification shown in popup window, suppress in original
+                suppressNextVLCLoadError_ = false;
+            } else {
+                // Fallback: show VLC notification in current window
+                frame->LoadURL(
+                    createSignedDataURL("Opening in VLC...", vlcNotificationPageSignKey_)
+                );
+            }
         } else if(errorCode != ERR_ABORTED) {
             string msg = "Loading URL failed due to error: " + string(errorText);
             window_->rootWidget_->browserArea()->showError(msg);
@@ -351,10 +490,16 @@ public:
 
         optional<string> errorURL1 = readSignedDataURL(url, certificateErrorPageSignKey_);
         optional<string> errorURL2 = readSignedDataURL(url, fileSchemeBlockedPageSignKey_);
+        optional<string> errorURL3 = readSignedDataURL(url, vlcNotificationPageSignKey_);
+        optional<string> errorURL3b = readSignedDataURL(url, vlcNotificationSignKey);
         if(errorURL1) {
             window_->rootWidget_->controlBar()->setAddress(*errorURL1);
         } else if(errorURL2) {
             window_->rootWidget_->controlBar()->setAddress(*errorURL2);
+        } else if(errorURL3) {
+            window_->rootWidget_->controlBar()->setAddress(*errorURL3);
+        } else if(errorURL3b) {
+            window_->rootWidget_->controlBar()->setAddress(*errorURL3b);
         } else {
             window_->rootWidget_->controlBar()->setAddress(url);
         }
@@ -371,6 +516,13 @@ public:
         string title = origTitle;
         string bookmarkTitle = origTitle;
         if(
+            readSignedDataURL(title, vlcNotificationPageSignKey_) ||
+            readSignedDataURL(title, vlcNotificationSignKey)
+        ) {
+            // VLC notification data URL — show as VLC integration title
+            title = "YouTube → VLC";
+            bookmarkTitle = "";
+        } else if(
             readSignedDataURL(title, certificateErrorPageSignKey_) ||
             readSignedDataURL(title, fileSchemeBlockedPageSignKey_)
         ) {
@@ -437,9 +589,110 @@ public:
     ) override {
         BROWSER_EVENT_HANDLER_CHECKS();
 
-        // Block local file requests (OnLoadError redirects to error message) if blocking enabled
         REQUIRE(request);
-        return globals->config->blockFileScheme && isLocalFileRequestURL(request->GetURL());
+        string url = request->GetURL();
+
+        // Block local file requests (OnLoadError redirects to error message) if blocking enabled
+        if(globals->config->blockFileScheme && isLocalFileRequestURL(url)) {
+            return true;
+        }
+
+        // YouTube → VLC detection
+        if(globals->config->vlcEnabled && isYouTubeVideoURL(url)) {
+            optional<string> videoID = extractYouTubeVideoID(url);
+            if(videoID.has_value()) {
+                if(globals->config->vlcClientIP.empty()) {
+                    WARNING_LOG(
+                        "VLC enabled but --vlc-client-ip not set, ",
+                        "ignoring YouTube URL: ", url
+                    );
+                    return false;
+                }
+
+                // Build VSP stream URL
+                string vspServer = globals->config->vspServer;
+                if(!vspServer.empty() && vspServer.back() == '/') {
+                    vspServer.pop_back();
+                }
+                string streamUrl = vspServer + "/" + globals->config->vspProfile
+                                 + "?v=" + videoID.value();
+                string encodedStreamUrl = CefURIEncode(streamUrl, false);
+
+                // Build helper URL with timeout
+                string helperUrl = "http://" + globals->config->vlcClientIP + ":"
+                                 + std::to_string(globals->config->vlcHelperPort)
+                                 + "/vlc?streamUrl=" + encodedStreamUrl
+                                 + "&timeout=" + std::to_string(globals->config->vlcTimeout);
+
+                INFO_LOG(
+                    "YouTube video detected (", videoID.value(),
+                    "), creating VLC notification popup for window ", window_->handle_
+                );
+
+                // R2: Create new popup window for VLC notification.
+                // Pattern from onOpenBookmarksButtonPressed.
+                // KEY FIX (B1): Pass signed data URL directly to tryCreate as initial URI.
+                // navigateToURI would fail because browser_ is null until OnAfterCreated.
+                string notifyURL = createSignedDataURL(
+                    "Opening in VLC...", vlcNotificationSignKey
+                );
+
+                shared_ptr<bool> allowAcceptCall(new bool);
+                *allowAcceptCall = false;
+                bool acceptCalled = false;
+                bool popupCreated = false;
+
+                auto accept = [&, allowAcceptCall](
+                    uint64_t newHandle
+                ) -> shared_ptr<Window> {
+                    REQUIRE(*allowAcceptCall);
+                    REQUIRE(!acceptCalled);
+                    acceptCalled = true;
+
+                    REQUIRE(newHandle);
+                    REQUIRE(newHandle != window_->handle_);
+
+                    INFO_LOG(
+                        "Creating VLC notification window ", newHandle,
+                        " (popup of window ", window_->handle_, ")"
+                    );
+
+                    // B1 FIX: Pass signed data URL as initial URI to tryCreate.
+                    // CEF loads this URI when the browser is created — no navigateToURI needed.
+                    shared_ptr<Window> newWindow = Window::tryCreate(
+                        window_->eventHandler_, window_->requestContext_, newHandle,
+                        /*uri=*/notifyURL,  // Signed data URL as initial URI
+                        window_->showSoftNavigationButtons_
+                    );
+
+                    if(newWindow) {
+                        popupCreated = true;
+                    }
+
+                    return newWindow;
+                };
+
+                REQUIRE(window_->eventHandler_);
+                *allowAcceptCall = true;
+                window_->eventHandler_->onWindowCreatePopupRequest(window_->handle_, accept);
+                *allowAcceptCall = false;
+
+                if(popupCreated) {
+                    // R2 success: suppress OnLoadError notification in original window
+                    suppressNextVLCLoadError_ = true;
+                }
+
+                // Fire HTTP request to helper (async, non-blocking)
+                sendHttpGetAsync(helperUrl);
+
+                // Cancel YouTube navigation in original window
+                return true;
+            } else {
+                WARNING_LOG("YouTube URL detected but video ID extraction failed: ", url);
+            }
+        }
+
+        return false;
     }
 
     virtual bool OnCertificateError(
@@ -583,6 +836,8 @@ private:
     optional<string> lastCertificateErrorURL_;
     string certificateErrorPageSignKey_;
     string fileSchemeBlockedPageSignKey_;
+    string vlcNotificationPageSignKey_;
+    bool suppressNextVLCLoadError_;
 
     IMPLEMENT_REFCOUNTING(Client);
 };

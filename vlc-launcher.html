@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>YouTube → VLC Stream</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+        }
+        .container {
+            background: #16213e;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+            max-width: 500px;
+            width: 100%;
+        }
+        h1 {
+            margin-top: 0;
+            color: #e94560;
+            font-size: 24px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #a0a0a0;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #333;
+            border-radius: 6px;
+            background: #0f3460;
+            color: #fff;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+        input[type="text"]::placeholder {
+            color: #666;
+        }
+        button {
+            width: 100%;
+            padding: 14px;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .play-btn {
+            background: #e94560;
+            color: #fff;
+        }
+        .play-btn:hover {
+            background: #c73e54;
+        }
+        .settings {
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #333;
+        }
+        .settings summary {
+            cursor: pointer;
+            color: #a0a0a0;
+        }
+        .status {
+            margin-top: 20px;
+            padding: 12px;
+            border-radius: 6px;
+            display: none;
+        }
+        .status.success {
+            display: block;
+            background: #1a4d2e;
+            color: #4ade80;
+        }
+        .status.error {
+            display: block;
+            background: #4d1a1a;
+            color: #f87171;
+        }
+        .status.info {
+            display: block;
+            background: #1a3a4d;
+            color: #60a5fa;
+        }
+        .history {
+            margin-top: 20px;
+        }
+        .history h3 {
+            color: #a0a0a0;
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+        .history-item {
+            padding: 8px;
+            background: #0f3460;
+            border-radius: 4px;
+            margin-bottom: 8px;
+            cursor: pointer;
+            font-size: 12px;
+            word-break: break-all;
+        }
+        .history-item:hover {
+            background: #1a4a6e;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📺 YouTube → VLC</h1>
+        
+        <div class="form-group">
+            <label for="serverUrl">VintageStreamProxy Server</label>
+            <input type="text" id="serverUrl" placeholder="http://192.168.1.100:33000">
+        </div>
+        
+        <div class="form-group">
+            <label for="youtubeUrl">YouTube URL</label>
+            <input type="text" id="youtubeUrl" placeholder="https://www.youtube.com/watch?v=...">
+        </div>
+        
+        <div class="form-group">
+            <label for="profile">Profile</label>
+            <input type="text" id="profile" placeholder="default (or: win98, mpeg1, xvid)">
+        </div>
+        
+        <button class="play-btn" onclick="playVideo()">▶ Open in VLC</button>
+        
+        <div id="status" class="status"></div>
+        
+        <details class="settings">
+            <summary>VLC Command (for reference)</summary>
+            <pre id="vlcCommand" style="background: #0f3460; padding: 10px; border-radius: 4px; font-size: 11px; overflow-x: auto;"></pre>
+        </details>
+        
+        <div class="history">
+            <h3>Recent Videos</h3>
+            <div id="historyList"></div>
+        </div>
+    </div>
+    
+    <script>
+        // Load saved settings
+        document.getElementById('serverUrl').value = localStorage.getItem('vspServer') || '';
+        document.getElementById('profile').value = localStorage.getItem('vspProfile') || 'default';
+        
+        // Load history
+        const history = JSON.parse(localStorage.getItem('vspHistory') || '[]');
+        renderHistory();
+        
+        function extractVideoId(url) {
+            const patterns = [
+                /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([^&\s?]+)/,
+                /^([a-zA-Z0-9_-]{11})$/
+            ];
+            for (const pattern of patterns) {
+                const match = url.match(pattern);
+                if (match) return match[1];
+            }
+            return null;
+        }
+        
+        function playVideo() {
+            const serverUrl = document.getElementById('serverUrl').value.trim();
+            const youtubeUrl = document.getElementById('youtubeUrl').value.trim();
+            const profile = document.getElementById('profile').value.trim() || 'default';
+            
+            if (!serverUrl) {
+                showStatus('Please enter the VintageStreamProxy server address', 'error');
+                return;
+            }
+            
+            const videoId = extractVideoId(youtubeUrl);
+            if (!videoId) {
+                showStatus('Invalid YouTube URL', 'error');
+                return;
+            }
+            
+            // Build the stream URL
+            const streamUrl = `${serverUrl}/${profile}?v=${videoId}`;
+            
+            // Build VLC command
+            const vlcCmd = `vlc "${streamUrl}"`;
+            
+            // Show the command
+            document.getElementById('vlcCommand').textContent = vlcCmd;
+            
+            // Try to open VLC via protocol handler
+            // Note: This only works if VLC is set as default for the protocol
+            // On the iMac G4, you'll need to copy this command or use the URL
+            
+            // For modern browsers, we can try vlc:// protocol
+            // But for old browsers, we'll show the command to copy
+            
+            showStatus(`Stream URL ready!\n\n${streamUrl}\n\nCopy this URL and open it in VLC.`, 'info');
+            
+            // Save to history
+            addToHistory(videoId, youtubeUrl);
+            
+            // Save settings
+            localStorage.setItem('vspServer', serverUrl);
+            localStorage.setItem('vspProfile', profile);
+        }
+        
+        function showStatus(msg, type) {
+            const el = document.getElementById('status');
+            el.textContent = msg;
+            el.className = `status ${type}`;
+        }
+        
+        function addToHistory(videoId, originalUrl) {
+            const entry = { videoId, url: originalUrl, time: new Date().toISOString() };
+            
+            // Remove if already exists
+            const filtered = history.filter(h => h.videoId !== videoId);
+            filtered.unshift(entry);
+            
+            // Keep only last 10
+            history.length = 0;
+            history.push(...filtered.slice(0, 10));
+            
+            localStorage.setItem('vspHistory', JSON.stringify(history));
+            renderHistory();
+        }
+        
+        function renderHistory() {
+            const container = document.getElementById('historyList');
+            if (history.length === 0) {
+                container.innerHTML = '<div style="color: #666; font-size: 12px;">No videos yet</div>';
+                return;
+            }
+            
+            container.innerHTML = history.map(h => `
+                <div class="history-item" onclick="loadFromHistory('${h.videoId}', '${h.url}')">
+                    ${h.videoId}
+                </div>
+            `).join('');
+        }
+        
+        function loadFromHistory(videoId, url) {
+            document.getElementById('youtubeUrl').value = url || videoId;
+        }
+    </script>
+</body>
+</html>

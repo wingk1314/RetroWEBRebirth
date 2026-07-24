@@ -17,7 +17,13 @@
     CONF_FOREACH_OPT_ITEM(initialZoom) \
     CONF_FOREACH_OPT_ITEM(browserFontRenderMode) \
     CONF_FOREACH_OPT_ITEM(certificateCheckExceptions) \
-    CONF_FOREACH_OPT_ITEM(showControlBar)
+    CONF_FOREACH_OPT_ITEM(showControlBar) \
+    CONF_FOREACH_OPT_ITEM(vlcEnabled) \
+    CONF_FOREACH_OPT_ITEM(vlcClientIP) \
+    CONF_FOREACH_OPT_ITEM(vlcHelperPort) \
+    CONF_FOREACH_OPT_ITEM(vspServer) \
+    CONF_FOREACH_OPT_ITEM(vspProfile) \
+    CONF_FOREACH_OPT_ITEM(vlcTimeout)
 
 CONF_DEF_OPT_INFO(vicePlugin) {
     const char* name = "vice-plugin";
@@ -277,5 +283,95 @@ CONF_DEF_OPT_INFO(showControlBar) {
     }
     bool defaultVal() {
         return true;
+    }
+};
+
+CONF_DEF_OPT_INFO(vlcEnabled) {
+    const char* name = "vlc-enabled";
+    const char* valSpec = "YES/NO";
+    string desc() {
+        return
+            "if enabled, YouTube video URLs are intercepted and sent to VLC on the client machine "
+            "via a helper service instead of being opened in the browser";
+    }
+    bool defaultVal() {
+        return false;
+    }
+};
+
+CONF_DEF_OPT_INFO(vlcClientIP) {
+    const char* name = "vlc-client-ip";
+    const char* valSpec = "IP";
+    string desc() {
+        return
+            "IP address of the client machine running the VLC helper service; "
+            "required when vlc-enabled is YES";
+    }
+    string defaultValStr() {
+        return "default empty";
+    }
+    string defaultVal() {
+        return "";
+    }
+    bool validate(const string& val) {
+        return !val.empty();
+    }
+};
+
+CONF_DEF_OPT_INFO(vlcHelperPort) {
+    const char* name = "vlc-helper-port";
+    const char* valSpec = "PORT";
+    string desc() {
+        return "port of the VLC helper service on the client machine";
+    }
+    int defaultVal() {
+        return 9999;
+    }
+    bool validate(int val) {
+        return val >= 1 && val <= 65535;
+    }
+};
+
+CONF_DEF_OPT_INFO(vspServer) {
+    const char* name = "vsp-server";
+    const char* valSpec = "URL";
+    string desc() {
+        return "VintageStreamProxy server URL";
+    }
+    string defaultVal() {
+        return "http://localhost:33000";
+    }
+    bool validate(const string& val) {
+        return !val.empty();
+    }
+};
+
+CONF_DEF_OPT_INFO(vspProfile) {
+    const char* name = "vsp-profile";
+    const char* valSpec = "NAME";
+    string desc() {
+        return "VintageStreamProxy profile name";
+    }
+    string defaultVal() {
+        return "default";
+    }
+    bool validate(const string& val) {
+        return !val.empty();
+    }
+};
+
+CONF_DEF_OPT_INFO(vlcTimeout) {
+    const char* name = "vlc-timeout";
+    const char* valSpec = "SECONDS";
+    string desc() {
+        return
+            "seconds of stream inactivity before VLC is automatically closed; "
+            "0 disables auto-close";
+    }
+    int defaultVal() {
+        return 300;
+    }
+    bool validate(int val) {
+        return val >= 0 && val <= 86400;
     }
 };
