@@ -8,10 +8,6 @@ VLC instances after a configurable timeout.
 Requirements:
   - Python 3.5+ (uses subprocess.run with capture_output, threading)
   - VLC installed and accessible via 'open -a VLC'
-  - Mac OS X with osascript (AppleScript) for fullscreen keystroke
-  - "Enable access for assistive devices" must be enabled in
-    System Preferences > Universal Access for System Events keystroke
-    commands to work on Tiger.
 
 Usage:
   python3 helper.py [--port PORT] [--vlc-timeout SECONDS]
@@ -46,29 +42,6 @@ args = None
 def log(msg):
     """Log a message with timestamp."""
     print("[{}] {}".format(time.strftime("%Y-%m-%d %H:%M:%S"), msg), flush=True)
-
-
-def check_assistive_devices():
-    """Check if 'Enable access for assistive devices' is enabled on Tiger.
-
-    On Mac OS X Tiger, System Events keystroke commands require this setting
-    to be enabled in System Preferences > Universal Access. If not enabled,
-    fullscreen keystroke will silently fail.
-    """
-    try:
-        # Try to run a harmless AppleScript via System Events
-        result = subprocess.run(
-            ['osascript', '-e', 'tell application "System Events" to get name'],
-            capture_output=True, text=True, timeout=5
-        )
-        if result.returncode != 0:
-            log("WARNING: 'Enable access for assistive devices' may not be enabled.")
-            log("  System Preferences > Universal Access > Enable access for assistive devices")
-            return False
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        log("WARNING: Could not verify assistive devices status (osascript not found or timeout).")
-        return False
-    return True
 
 
 def kill_existing_vlc():
@@ -232,8 +205,6 @@ def main():
 
     log("Browservice VLC Helper starting on port {}".format(args.port))
     log("Default VLC timeout: {}s".format(args.vlc_timeout))
-
-    check_assistive_devices()
 
     server = HTTPServer(('0.0.0.0', args.port), VLCRequestHandler)
     log("Listening on 0.0.0.0:{}".format(args.port))
