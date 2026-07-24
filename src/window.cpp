@@ -1364,7 +1364,7 @@ void Window::sendCurrentURLToVLC() {
     } else {
         // Pass the full URL to VSP for non-YouTube sites
         streamUrl = vspServer + "/" + globals->config->vspProfile
-                   + "?url=" + CefURIEncode(url, false);
+                   + "?url=" + string(CefURIEncode(url, false).ToString());
         INFO_LOG("Manual VLC: generic URL ", url);
     }
 
