@@ -1415,11 +1415,6 @@ void ControlBar::widgetViewportUpdated_() {
         resolutionButton_->setViewport(viewport.subRect(
             layout.resolutionButtonStart, layout.resolutionButtonEnd, 1, Height - 4
         ));
-        if(resolutionText_) {
-            resolutionText_->setViewport(viewport.subRect(
-                layout.resolutionTextStart, layout.resolutionTextEnd, 1, Height - 4
-            ));
-        }
     }
     if(isDownloadVisible_()) {
         downloadButton_->setViewport(viewport.subRect(
@@ -1500,6 +1495,17 @@ void ControlBar::widgetRender_() {
         qualityText_->render(
             viewport.subRect(
                 layout.qualityTextStart, layout.qualityTextEnd,
+                1, Height - 4
+            ),
+            3, -4
+        );
+    }
+
+    // Resolution text
+    if(resolutionSelectorEnabled_ && resolutionText_) {
+        resolutionText_->render(
+            viewport.subRect(
+                layout.resolutionTextStart, layout.resolutionTextEnd,
                 1, Height - 4
             ),
             3, -4
