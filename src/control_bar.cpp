@@ -1603,9 +1603,6 @@ vector<shared_ptr<Widget>> ControlBar::widgetListChildren_() {
     }
     if(resolutionSelectorEnabled_) {
         children.push_back(resolutionButton_);
-        if(resolutionText_) {
-            children.push_back(resolutionText_);
-        }
     }
     if(isDownloadVisible_()) {
         children.push_back(downloadButton_);
