@@ -37,7 +37,7 @@ PROFILES = {
         "vcodec": "mpeg4",
         "acodec": "aac",
         "format": "mp4",
-        "extra": "-movflags +frag_keyframe+empty_moov+default_base_moof -minrate 2500k -maxrate 2500k -bufsize 5000k",
+        "extra": "-movflags +faststart",
     },
     "480p": {
         "scale": "640:480",
@@ -46,7 +46,7 @@ PROFILES = {
         "vcodec": "mpeg4",
         "acodec": "aac",
         "format": "mp4",
-        "extra": "-movflags +frag_keyframe+empty_moov+default_base_moof -minrate 1000k -maxrate 1000k -bufsize 2000k",
+        "extra": "-movflags +faststart",
     },
     "360p": {
         "scale": "480:360",
@@ -55,7 +55,7 @@ PROFILES = {
         "vcodec": "mpeg4",
         "acodec": "aac",
         "format": "mp4",
-        "extra": "-movflags +frag_keyframe+empty_moov+default_base_moof -minrate 500k -maxrate 500k -bufsize 1000k",
+        "extra": "-movflags +faststart",
     },
     "240p": {
         "scale": "320:240",
@@ -64,7 +64,7 @@ PROFILES = {
         "vcodec": "mpeg4",
         "acodec": "aac",
         "format": "mp4",
-        "extra": "-movflags +frag_keyframe+empty_moov+default_base_moof -minrate 200k -maxrate 200k -bufsize 400k",
+        "extra": "-movflags +faststart",
     },
     "144p": {
         "scale": "256:144",
@@ -73,7 +73,7 @@ PROFILES = {
         "vcodec": "mpeg4",
         "acodec": "aac",
         "format": "mp4",
-        "extra": "-movflags +frag_keyframe+empty_moov+default_base_moof -minrate 100k -maxrate 100k -bufsize 200k",
+        "extra": "-movflags +faststart",
     },
 }
 
@@ -208,7 +208,7 @@ def start_ffmpeg(stream_urls, profile_name, video_id, output_path):
         "-max_muxing_queue_size", "1024",
     ]
 
-    # Add extra flags (e.g., -movflags +frag_keyframe+empty_moov+default_base_moof -minrate 2500k -maxrate 2500k -bufsize 5000k)
+    # Add extra flags (e.g., -movflags +faststart)
     if profile.get("extra"):
         cmd.extend(profile["extra"].split())
 
@@ -531,13 +531,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                     log("Client disconnected (cache serve)")
                 return
 
-            # First play - estimate Content-Length for seekbar
-            estimated_size = None
-            if duration:
-                estimated_size = estimate_file_size(duration, profile_name)
-                log("Estimated size: %d bytes (duration: %.0fs)" % (estimated_size, duration))
-
-            # Wait for initial buffer (moov atom)
+            # First play - stream via chunked encoding (plays immediately)
             log("Waiting for initial buffer...")
             for _ in range(10):
                 time.sleep(0.5)
@@ -568,19 +562,16 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
 
             threading.Thread(target=monitor_ffmpeg, daemon=True).start()
 
-            # Stream with estimated Content-Length (seekbar works)
-            content_length = estimated_size if estimated_size else 80000000  # fallback 80MB
-            log("Streaming live with Content-Length: %d" % content_length)
+            # Stream via chunked encoding (plays immediately, no seekbar)
+            log("Streaming live: %s" % video_id)
             try:
                 self.send_response(200)
                 self.send_header("Content-Type", "video/mp4")
-                self.send_header("Content-Length", str(content_length))
-                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Transfer-Encoding", "chunked")
                 self.end_headers()
 
-                bytes_sent = 0
                 with open(cache_file_path, "rb") as f:
-                    while bytes_sent < content_length:
+                    while True:
                         pos = f.tell()
                         f.seek(0, 2)
                         end_pos = f.tell()
@@ -589,21 +580,25 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                         if end_pos > pos:
                             chunk = f.read(min(end_pos - pos, 65536))
                             if chunk:
+                                self.wfile.write(("%x\r\n" % len(chunk)).encode())
                                 self.wfile.write(chunk)
+                                self.wfile.write(b"\r\n")
                                 self.wfile.flush()
-                                bytes_sent += len(chunk)
                         else:
                             if proc.poll() is not None:
-                                # ffmpeg done, read remaining
-                                while bytes_sent < content_length:
+                                while True:
                                     chunk = f.read(65536)
                                     if not chunk:
                                         break
+                                    self.wfile.write(("%x\r\n" % len(chunk)).encode())
                                     self.wfile.write(chunk)
+                                    self.wfile.write(b"\r\n")
                                     self.wfile.flush()
-                                    bytes_sent += len(chunk)
                                 break
                             time.sleep(0.25)
+
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
 
             except (BrokenPipeError, ConnectionResetError, OSError):
                 log("Client disconnected for %s" % video_id)
