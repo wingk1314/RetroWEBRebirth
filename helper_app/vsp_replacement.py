@@ -28,51 +28,52 @@ CACHE_DIR = "/tmp/vsp_cache"
 
 # Transcoding profiles: resolution, video bitrate, audio bitrate, codec
 # iMac G4 display is 1024x768 — 720p is the sweet spot
+# Using MP4 format with faststart for QuickTime progressive download
 PROFILES = {
     "720p": {
         "scale": "1280:720",
         "video_bitrate": "2500k",
         "audio_bitrate": "128k",
-        "vcodec": "mpeg2video",
-        "acodec": "mp2",
-        "format": "mpegts",
-        "extra": "",
+        "vcodec": "mpeg4",
+        "acodec": "aac",
+        "format": "mp4",
+        "extra": "-movflags +faststart",
     },
     "480p": {
         "scale": "640:480",
         "video_bitrate": "1000k",
         "audio_bitrate": "128k",
-        "vcodec": "mpeg2video",
-        "acodec": "mp2",
-        "format": "mpegts",
-        "extra": "",
+        "vcodec": "mpeg4",
+        "acodec": "aac",
+        "format": "mp4",
+        "extra": "-movflags +faststart",
     },
     "360p": {
         "scale": "480:360",
         "video_bitrate": "500k",
         "audio_bitrate": "96k",
-        "vcodec": "mpeg2video",
-        "acodec": "mp2",
-        "format": "mpegts",
-        "extra": "",
+        "vcodec": "mpeg4",
+        "acodec": "aac",
+        "format": "mp4",
+        "extra": "-movflags +faststart",
     },
     "240p": {
         "scale": "320:240",
         "video_bitrate": "200k",
         "audio_bitrate": "64k",
-        "vcodec": "mpeg1video",
-        "acodec": "mp2",
-        "format": "mpegts",
-        "extra": "",
+        "vcodec": "mpeg4",
+        "acodec": "aac",
+        "format": "mp4",
+        "extra": "-movflags +faststart",
     },
     "144p": {
         "scale": "256:144",
         "video_bitrate": "100k",
         "audio_bitrate": "32k",
-        "vcodec": "mpeg1video",
-        "acodec": "mp2",
-        "format": "mpegts",
-        "extra": "",
+        "vcodec": "mpeg4",
+        "acodec": "aac",
+        "format": "mp4",
+        "extra": "-movflags +faststart",
     },
 }
 
@@ -92,7 +93,7 @@ cache_lock = threading.Lock()
 
 def get_cache_path(video_id, profile_name):
     """Get the file path for a cached video."""
-    return os.path.join(CACHE_DIR, "%s_%s.ts" % (video_id, profile_name))
+    return os.path.join(CACHE_DIR, "%s_%s.mp4" % (video_id, profile_name))
 
 
 def get_video_duration(video_id):
@@ -205,8 +206,13 @@ def start_ffmpeg(stream_urls, profile_name, video_id, output_path):
         "-ar", "44100",
         "-ac", "2",
         "-max_muxing_queue_size", "1024",
-        output_path,
     ]
+
+    # Add extra flags (e.g., -movflags +faststart)
+    if profile.get("extra"):
+        cmd.extend(profile["extra"].split())
+
+    cmd.append(output_path)
 
     log("Starting ffmpeg for %s (profile: %s, %d streams)" % (
         video_id, profile_name, len(stream_urls)
@@ -391,7 +397,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                     end = int(parts[1]) if parts[1] else file_size - 1
                     length = end - start + 1
                     self.send_response(206)
-                    self.send_header("Content-Type", "video/mp2t")
+                    self.send_header("Content-Type", "video/mp4")
                     self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, file_size))
                     self.send_header("Content-Length", str(length))
                     self.send_header("Accept-Ranges", "bytes")
@@ -408,7 +414,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                             remaining -= len(chunk)
                 else:
                     self.send_response(200)
-                    self.send_header("Content-Type", "video/mp2t")
+                    self.send_header("Content-Type", "video/mp4")
                     self.send_header("Content-Length", str(file_size))
                     self.send_header("Accept-Ranges", "bytes")
                     self.end_headers()
@@ -529,7 +535,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                     end = int(parts[1]) if parts[1] else file_size - 1
                     length = end - start + 1
                     self.send_response(206)
-                    self.send_header("Content-Type", "video/mp2t")
+                    self.send_header("Content-Type", "video/mp4")
                     self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, file_size))
                     self.send_header("Content-Length", str(length))
                     self.send_header("Accept-Ranges", "bytes")
@@ -546,7 +552,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                             remaining -= len(chunk)
                 else:
                     self.send_response(200)
-                    self.send_header("Content-Type", "video/mp2t")
+                    self.send_header("Content-Type", "video/mp4")
                     self.send_header("Content-Length", str(file_size))
                     self.send_header("Accept-Ranges", "bytes")
                     self.end_headers()
