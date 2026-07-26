@@ -95,6 +95,47 @@ def get_cache_path(video_id, profile_name):
     return os.path.join(CACHE_DIR, "%s_%s.ts" % (video_id, profile_name))
 
 
+def get_video_duration(video_id):
+    """Get video duration in seconds from yt-dlp."""
+    try:
+        result = subprocess.run(
+            [
+                "yt-dlp",
+                "--no-warnings",
+                "--get-duration",
+                "https://www.youtube.com/watch?v=%s" % video_id,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            duration_str = result.stdout.strip()
+            # Parse HH:MM:SS or MM:SS or seconds
+            parts = duration_str.split(":")
+            if len(parts) == 3:
+                return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+            elif len(parts) == 2:
+                return int(parts[0]) * 60 + float(parts[1])
+            else:
+                return float(parts[0])
+    except Exception as e:
+        log("Duration lookup failed for %s: %s" % (video_id, str(e)))
+    return None
+
+
+def estimate_file_size(duration_secs, profile_name):
+    """Estimate output file size from duration and bitrate."""
+    profile = PROFILES.get(profile_name, PROFILES[DEFAULT_PROFILE])
+    # Parse bitrates (e.g., "2500k" -> 2500000 bits/sec)
+    vbr = int(profile["video_bitrate"].replace("k", "")) * 1000
+    abr = int(profile["audio_bitrate"].replace("k", "")) * 1000
+    bits_per_sec = vbr + abr
+    # Add ~10% overhead for MPEG-TS container
+    bytes_est = int(duration_secs * bits_per_sec / 8 * 1.10)
+    return bytes_est
+
+
 def log(msg):
     ts = time.strftime("%H:%M:%S")
     print("[%s] %s" % (ts, msg), flush=True)
@@ -399,6 +440,15 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
 
             log("Request: profile=%s video_id=%s" % (profile_name, video_id))
 
+            # Get video duration for estimated Content-Length
+            duration = get_video_duration(video_id)
+            if duration:
+                estimated_size = estimate_file_size(duration, profile_name)
+                log("Duration: %.0fs, Estimated size: %d bytes" % (duration, estimated_size))
+            else:
+                estimated_size = None
+                log("Could not get duration, will use actual file size")
+
             stream_urls = get_stream_urls(video_id)
             if not stream_urls:
                 self.send_error(502, "Failed to extract stream URL")
@@ -429,58 +479,55 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             stderr_thread = threading.Thread(target=log_ffmpeg_stderr, daemon=True)
             stderr_thread.start()
 
-            # Wait for initial buffer (5 seconds of video)
-            initial_wait = 5
-            for _ in range(initial_wait * 2):  # Check every 0.5s
+            # Wait for initial buffer (3 seconds of video)
+            for _ in range(6):  # Check every 0.5s
                 time.sleep(0.5)
                 if os.path.exists(cache_file_path) and os.path.getsize(cache_file_path) > 0:
                     break
-                # Check if ffmpeg died
                 if proc.poll() is not None:
                     break
 
             if not os.path.exists(cache_file_path) or os.path.getsize(cache_file_path) == 0:
-                log("No initial buffer for %s - ffmpeg may have failed" % video_id)
-                # Check ffmpeg exit code
-                if proc.poll() is not None:
-                    log("ffmpeg exited with code %d" % proc.returncode)
+                log("No initial buffer for %s" % video_id)
                 self.send_error(500, "Transcoding failed - no output")
                 with streams_lock:
                     active_streams.pop(video_id, None)
                 return
 
-            # Monitor ffmpeg in background
+            # Monitor ffmpeg in background to update cache when done
             def monitor_ffmpeg():
                 proc.wait()
+                final_size = os.path.getsize(cache_file_path) if os.path.exists(cache_file_path) else 0
                 with cache_lock:
-                    cache_size = os.path.getsize(cache_file_path) if os.path.exists(cache_file_path) else 0
                     cache_state[video_id] = {
                         "file": cache_file_path,
-                        "size": cache_size,
+                        "size": final_size,
                         "done": True,
                         "profile": profile_name,
                     }
-                log("FFmpeg finished: %s (%d bytes)" % (video_id, cache_size))
+                log("FFmpeg finished: %s (%d bytes)" % (video_id, final_size))
 
             monitor_thread = threading.Thread(target=monitor_ffmpeg, daemon=True)
             monitor_thread.start()
 
-            # Serve from file - VLC can seek within what's available
-            log("Serving file for %s (seekable from start)" % video_id)
+            # Use estimated size if available, else current file size
+            content_length = estimated_size if estimated_size else os.path.getsize(cache_file_path)
+
+            log("Serving for %s (Content-Length: %d)" % (video_id, content_length))
 
             try:
                 range_header = self.headers.get("Range")
                 if range_header:
-                    # Range request (seeking)
-                    file_size = os.path.getsize(cache_file_path)
+                    # Range request (seeking) - serve from actual file
+                    actual_size = os.path.getsize(cache_file_path)
                     range_spec = range_header.replace("bytes=", "")
                     parts = range_spec.split("-")
                     start = int(parts[0]) if parts[0] else 0
-                    end = int(parts[1]) if parts[1] else file_size - 1
+                    end = int(parts[1]) if parts[1] else actual_size - 1
                     length = end - start + 1
                     self.send_response(206)
                     self.send_header("Content-Type", "video/mp2t")
-                    self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, file_size))
+                    self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, actual_size))
                     self.send_header("Content-Length", str(length))
                     self.send_header("Accept-Ranges", "bytes")
                     self.end_headers()
@@ -495,27 +542,26 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                             self.wfile.write(chunk)
                             remaining -= len(chunk)
                 else:
-                    # Initial request - stream from file as it grows
+                    # Initial request - serve with estimated Content-Length
+                    # Stream from file as it grows (like online video)
                     self.send_response(200)
                     self.send_header("Content-Type", "video/mp2t")
-                    self.send_header("Transfer-Encoding", "chunked")
+                    self.send_header("Content-Length", str(content_length))
                     self.send_header("Accept-Ranges", "bytes")
                     self.end_headers()
 
+                    bytes_sent = 0
                     with open(cache_file_path, "rb") as f:
-                        while True:
+                        while bytes_sent < content_length:
                             # Check if ffmpeg is still running
                             if proc.poll() is not None:
-                                # Read remaining data
-                                while True:
+                                # Read remaining data from file
+                                while bytes_sent < content_length:
                                     chunk = f.read(65536)
                                     if not chunk:
                                         break
-                                    size_hex = "%x\r\n" % len(chunk)
-                                    self.wfile.write(size_hex.encode())
                                     self.wfile.write(chunk)
-                                    self.wfile.write(b"\r\n")
-                                    self.wfile.flush()
+                                    bytes_sent += len(chunk)
                                 break
 
                             # Read available data
@@ -527,16 +573,10 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                             if end_pos > pos:
                                 chunk = f.read(end_pos - pos)
                                 if chunk:
-                                    size_hex = "%x\r\n" % len(chunk)
-                                    self.wfile.write(size_hex.encode())
                                     self.wfile.write(chunk)
-                                    self.wfile.write(b"\r\n")
-                                    self.wfile.flush()
+                                    bytes_sent += len(chunk)
                             else:
                                 time.sleep(0.25)
-
-                    self.wfile.write(b"0\r\n\r\n")
-                    self.wfile.flush()
 
             except (BrokenPipeError, ConnectionResetError, OSError):
                 log("Client disconnected for %s" % video_id)
