@@ -486,53 +486,42 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             stderr_thread = threading.Thread(target=log_ffmpeg_stderr, daemon=True)
             stderr_thread.start()
 
-            # Wait for initial buffer (5 seconds - need moov atom for MP4)
-            log("Waiting for initial buffer...")
-            for _ in range(10):  # Check every 0.5s
-                time.sleep(0.5)
-                if os.path.exists(cache_file_path) and os.path.getsize(cache_file_path) > 0:
-                    break
-                if proc.poll() is not None:
-                    break
+            # Wait for ffmpeg to complete
+            log("Waiting for ffmpeg to complete...")
+            proc.wait()
 
             if not os.path.exists(cache_file_path) or os.path.getsize(cache_file_path) == 0:
-                log("No initial buffer for %s" % video_id)
+                log("ffmpeg produced no output for %s" % video_id)
                 self.send_error(500, "Transcoding failed - no output")
                 with streams_lock:
                     active_streams.pop(video_id, None)
                 return
 
-            # Monitor ffmpeg in background to update cache when done
-            def monitor_ffmpeg():
-                proc.wait()
-                final_size = os.path.getsize(cache_file_path) if os.path.exists(cache_file_path) else 0
-                with cache_lock:
-                    cache_state[video_id] = {
-                        "file": cache_file_path,
-                        "size": final_size,
-                        "done": True,
-                        "profile": profile_name,
-                    }
-                log("FFmpeg finished: %s (%d bytes)" % (video_id, final_size))
+            file_size = os.path.getsize(cache_file_path)
+            log("Transcoding complete: %s (%d bytes)" % (video_id, file_size))
 
-            monitor_thread = threading.Thread(target=monitor_ffmpeg, daemon=True)
-            monitor_thread.start()
+            # Mark in cache state
+            with cache_lock:
+                cache_state[video_id] = {
+                    "file": cache_file_path,
+                    "size": file_size,
+                    "done": True,
+                    "profile": profile_name,
+                }
 
-            content_length = estimated_size if estimated_size else os.path.getsize(cache_file_path)
-            log("Serving MP4 for %s" % video_id)
-
+            # Serve the complete file with real Content-Length
+            # VLC shows progress bar and seeking works
             try:
                 range_header = self.headers.get("Range")
                 if range_header:
-                    actual_size = os.path.getsize(cache_file_path)
                     range_spec = range_header.replace("bytes=", "")
                     parts = range_spec.split("-")
                     start = int(parts[0]) if parts[0] else 0
-                    end = int(parts[1]) if parts[1] else actual_size - 1
+                    end = int(parts[1]) if parts[1] else file_size - 1
                     length = end - start + 1
                     self.send_response(206)
                     self.send_header("Content-Type", "video/mp4")
-                    self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, actual_size))
+                    self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, file_size))
                     self.send_header("Content-Length", str(length))
                     self.send_header("Accept-Ranges", "bytes")
                     self.end_headers()
@@ -547,45 +536,17 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                             self.wfile.write(chunk)
                             remaining -= len(chunk)
                 else:
-                    # Initial request - stream with chunked encoding
-                    # QuickTime plays as data arrives
                     self.send_response(200)
                     self.send_header("Content-Type", "video/mp4")
-                    self.send_header("Transfer-Encoding", "chunked")
+                    self.send_header("Content-Length", str(file_size))
                     self.send_header("Accept-Ranges", "bytes")
                     self.end_headers()
-
                     with open(cache_file_path, "rb") as f:
                         while True:
-                            pos = f.tell()
-                            f.seek(0, 2)
-                            end_pos = f.tell()
-                            f.seek(pos)
-
-                            if end_pos > pos:
-                                chunk = f.read(min(end_pos - pos, 65536))
-                                if chunk:
-                                    size_hex = "%x\r\n" % len(chunk)
-                                    self.wfile.write(size_hex.encode())
-                                    self.wfile.write(chunk)
-                                    self.wfile.write(b"\r\n")
-                                    self.wfile.flush()
-                            else:
-                                if proc.poll() is not None:
-                                    while True:
-                                        chunk = f.read(65536)
-                                        if not chunk:
-                                            break
-                                        size_hex = "%x\r\n" % len(chunk)
-                                        self.wfile.write(size_hex.encode())
-                                        self.wfile.write(chunk)
-                                        self.wfile.write(b"\r\n")
-                                        self.wfile.flush()
-                                    break
-                                time.sleep(0.25)
-
-                    self.wfile.write(b"0\r\n\r\n")
-                    self.wfile.flush()
+                            chunk = f.read(65536)
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
 
             except (BrokenPipeError, ConnectionResetError, OSError):
                 log("Client disconnected for %s" % video_id)
