@@ -37,7 +37,7 @@ PROFILES = {
         "vcodec": "mpeg4",
         "acodec": "aac",
         "format": "mp4",
-        "extra": "-movflags +frag_keyframe+empty_moov+default_base_moof",
+        "extra": "-movflags +faststart",
     },
     "480p": {
         "scale": "640:480",
@@ -46,7 +46,7 @@ PROFILES = {
         "vcodec": "mpeg4",
         "acodec": "aac",
         "format": "mp4",
-        "extra": "-movflags +frag_keyframe+empty_moov+default_base_moof",
+        "extra": "-movflags +faststart",
     },
     "360p": {
         "scale": "480:360",
@@ -55,7 +55,7 @@ PROFILES = {
         "vcodec": "mpeg4",
         "acodec": "aac",
         "format": "mp4",
-        "extra": "-movflags +frag_keyframe+empty_moov+default_base_moof",
+        "extra": "-movflags +faststart",
     },
     "240p": {
         "scale": "320:240",
@@ -64,7 +64,7 @@ PROFILES = {
         "vcodec": "mpeg4",
         "acodec": "aac",
         "format": "mp4",
-        "extra": "-movflags +frag_keyframe+empty_moov+default_base_moof",
+        "extra": "-movflags +faststart",
     },
     "144p": {
         "scale": "256:144",
@@ -73,7 +73,7 @@ PROFILES = {
         "vcodec": "mpeg4",
         "acodec": "aac",
         "format": "mp4",
-        "extra": "-movflags +frag_keyframe+empty_moov+default_base_moof",
+        "extra": "-movflags +faststart",
     },
 }
 
@@ -208,7 +208,7 @@ def start_ffmpeg(stream_urls, profile_name, video_id, output_path):
         "-max_muxing_queue_size", "1024",
     ]
 
-    # Add extra flags (e.g., -movflags +frag_keyframe+empty_moov+default_base_moof)
+    # Add extra flags (e.g., -movflags +faststart)
     if profile.get("extra"):
         cmd.extend(profile["extra"].split())
 
