@@ -28,7 +28,7 @@ CACHE_DIR = "/tmp/vsp_cache"
 
 # Transcoding profiles: resolution, video bitrate, audio bitrate, codec
 # iMac G4 display is 1024x768 — 720p is the sweet spot
-# Using MP4 format with faststart for QuickTime progressive download
+# mpeg4 is G4-friendly (no H.264 decode overhead)
 PROFILES = {
     "720p": {
         "scale": "1280:720",
@@ -519,7 +519,8 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             monitor_thread.start()
 
             content_length = estimated_size if estimated_size else os.path.getsize(cache_file_path)
-            log("Serving MP4 for %s (Content-Length: %d)" % (video_id, content_length))
+            log("Serving MP4 for %s" % video_id)
+
             try:
                 range_header = self.headers.get("Range")
                 if range_header:
@@ -546,43 +547,45 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                             self.wfile.write(chunk)
                             remaining -= len(chunk)
                 else:
-                    # Initial request - serve with estimated Content-Length
-                    # Stream from file as it grows (MP4 with faststart)
+                    # Initial request - stream with chunked encoding
+                    # QuickTime plays as data arrives
                     self.send_response(200)
                     self.send_header("Content-Type", "video/mp4")
-                    self.send_header("Content-Length", str(content_length))
+                    self.send_header("Transfer-Encoding", "chunked")
                     self.send_header("Accept-Ranges", "bytes")
                     self.end_headers()
 
-                    bytes_sent = 0
                     with open(cache_file_path, "rb") as f:
-                        while bytes_sent < content_length:
-                            # Read available data
+                        while True:
                             pos = f.tell()
-                            f.seek(0, 2)  # Seek to end
+                            f.seek(0, 2)
                             end_pos = f.tell()
                             f.seek(pos)
 
                             if end_pos > pos:
                                 chunk = f.read(min(end_pos - pos, 65536))
                                 if chunk:
+                                    size_hex = "%x\r\n" % len(chunk)
+                                    self.wfile.write(size_hex.encode())
                                     self.wfile.write(chunk)
+                                    self.wfile.write(b"\r\n")
                                     self.wfile.flush()
-                                    bytes_sent += len(chunk)
                             else:
-                                # No more data yet - check if ffmpeg is done
                                 if proc.poll() is not None:
-                                    # ffmpeg finished, read remaining
-                                    while bytes_sent < content_length:
+                                    while True:
                                         chunk = f.read(65536)
                                         if not chunk:
                                             break
+                                        size_hex = "%x\r\n" % len(chunk)
+                                        self.wfile.write(size_hex.encode())
                                         self.wfile.write(chunk)
+                                        self.wfile.write(b"\r\n")
                                         self.wfile.flush()
-                                        bytes_sent += len(chunk)
                                     break
-                                # Wait for more data
                                 time.sleep(0.25)
+
+                    self.wfile.write(b"0\r\n\r\n")
+                    self.wfile.flush()
 
             except (BrokenPipeError, ConnectionResetError, OSError):
                 log("Client disconnected for %s" % video_id)
