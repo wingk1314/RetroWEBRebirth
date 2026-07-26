@@ -137,8 +137,11 @@ def monitor_stream(pid):
 def launch_quicktime(stream_url, timeout):
     kill_existing_player()
     time.sleep(0.5)
-    subprocess.Popen(['open', '-a', 'QuickTime Player', stream_url])
-    time.sleep(1.5)
+    # Use AppleScript to open URL in QuickTime Player
+    # (open -a doesn't work for HTTP URLs on Leopard)
+    applescript = 'tell application "QuickTime Player"\nopen URL "%s"\nend tell' % stream_url
+    subprocess.Popen(['osascript', '-e', applescript])
+    time.sleep(2)
     pid = get_player_pid()
     if pid is None:
         log("Warning: Could not determine QuickTime Player PID")

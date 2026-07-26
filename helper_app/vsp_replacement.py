@@ -190,6 +190,7 @@ def start_ffmpeg(stream_urls, profile_name, video_id, output_path):
 
     cmd = [
         "ffmpeg",
+        "-y",
         "-re",
     ] + input_args + [
         "-f", profile["format"],
