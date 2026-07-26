@@ -131,8 +131,8 @@ def get_stream_urls(video_id):
         return None
 
 
-def start_ffmpeg(stream_urls, profile_name, video_id):
-    """Start ffmpeg to transcode and stream the video."""
+def start_ffmpeg(stream_urls, profile_name, video_id, output_path):
+    """Start ffmpeg to transcode to a file for caching/seeking."""
     profile = PROFILES.get(profile_name, PROFILES[DEFAULT_PROFILE])
 
     # Build input args - one -i per stream URL
@@ -163,7 +163,7 @@ def start_ffmpeg(stream_urls, profile_name, video_id):
         "-ar", "44100",
         "-ac", "2",
         "-max_muxing_queue_size", "1024",
-        "pipe:1",
+        output_path,
     ]
 
     log("Starting ffmpeg for %s (profile: %s, %d streams)" % (
@@ -176,7 +176,7 @@ def start_ffmpeg(stream_urls, profile_name, video_id):
     try:
         proc = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             bufsize=0,
         )
@@ -404,7 +404,9 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                 self.send_error(502, "Failed to extract stream URL")
                 return
 
-            proc = start_ffmpeg(stream_urls, profile_name, video_id)
+            cache_file_path = get_cache_path(video_id, profile_name)
+
+            proc = start_ffmpeg(stream_urls, profile_name, video_id, cache_file_path)
             if proc is None:
                 self.send_error(500, "Failed to start ffmpeg")
                 return
@@ -412,80 +414,146 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             with streams_lock:
                 active_streams[video_id] = proc
 
-            # Cache file for this stream
-            cache_file_path = get_cache_path(video_id, profile_name)
-            cache_file = None
-            try:
-                cache_file = open(cache_file_path, "wb")
-            except Exception as e:
-                log("Cache file open error: %s" % str(e))
+            log("Transcoding to file: %s" % cache_file_path)
+
+            # Log ffmpeg stderr in background for debugging
+            def log_ffmpeg_stderr():
+                try:
+                    while True:
+                        line = proc.stderr.readline()
+                        if not line:
+                            break
+                        log("ffmpeg: %s" % line.decode(errors='replace').strip())
+                except:
+                    pass
+            stderr_thread = threading.Thread(target=log_ffmpeg_stderr, daemon=True)
+            stderr_thread.start()
+
+            # Wait for initial buffer (5 seconds of video)
+            initial_wait = 5
+            for _ in range(initial_wait * 2):  # Check every 0.5s
+                time.sleep(0.5)
+                if os.path.exists(cache_file_path) and os.path.getsize(cache_file_path) > 0:
+                    break
+                # Check if ffmpeg died
+                if proc.poll() is not None:
+                    break
+
+            if not os.path.exists(cache_file_path) or os.path.getsize(cache_file_path) == 0:
+                log("No initial buffer for %s - ffmpeg may have failed" % video_id)
+                # Check ffmpeg exit code
+                if proc.poll() is not None:
+                    log("ffmpeg exited with code %d" % proc.returncode)
+                self.send_error(500, "Transcoding failed - no output")
+                with streams_lock:
+                    active_streams.pop(video_id, None)
+                return
+
+            # Monitor ffmpeg in background
+            def monitor_ffmpeg():
+                proc.wait()
+                with cache_lock:
+                    cache_size = os.path.getsize(cache_file_path) if os.path.exists(cache_file_path) else 0
+                    cache_state[video_id] = {
+                        "file": cache_file_path,
+                        "size": cache_size,
+                        "done": True,
+                        "profile": profile_name,
+                    }
+                log("FFmpeg finished: %s (%d bytes)" % (video_id, cache_size))
+
+            monitor_thread = threading.Thread(target=monitor_ffmpeg, daemon=True)
+            monitor_thread.start()
+
+            # Serve from file - VLC can seek within what's available
+            log("Serving file for %s (seekable from start)" % video_id)
 
             try:
-                self.send_response(200)
-                self.send_header("Content-Type", "video/mp2t")
-                self.send_header("Transfer-Encoding", "chunked")
-                self.end_headers()
+                range_header = self.headers.get("Range")
+                if range_header:
+                    # Range request (seeking)
+                    file_size = os.path.getsize(cache_file_path)
+                    range_spec = range_header.replace("bytes=", "")
+                    parts = range_spec.split("-")
+                    start = int(parts[0]) if parts[0] else 0
+                    end = int(parts[1]) if parts[1] else file_size - 1
+                    length = end - start + 1
+                    self.send_response(206)
+                    self.send_header("Content-Type", "video/mp2t")
+                    self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, file_size))
+                    self.send_header("Content-Length", str(length))
+                    self.send_header("Accept-Ranges", "bytes")
+                    self.end_headers()
+                    with open(cache_file_path, "rb") as f:
+                        f.seek(start)
+                        remaining = length
+                        while remaining > 0:
+                            chunk_size = min(65536, remaining)
+                            chunk = f.read(chunk_size)
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                            remaining -= len(chunk)
+                else:
+                    # Initial request - stream from file as it grows
+                    self.send_response(200)
+                    self.send_header("Content-Type", "video/mp2t")
+                    self.send_header("Transfer-Encoding", "chunked")
+                    self.send_header("Accept-Ranges", "bytes")
+                    self.end_headers()
 
-                while True:
-                    chunk = proc.stdout.read(65536)
-                    if not chunk:
-                        break
-                    # Write to cache file
-                    if cache_file:
-                        try:
-                            cache_file.write(chunk)
-                        except Exception:
-                            pass
-                    # Stream to client
-                    size_hex = "%x\r\n" % len(chunk)
-                    self.wfile.write(size_hex.encode())
-                    self.wfile.write(chunk)
-                    self.wfile.write(b"\r\n")
+                    with open(cache_file_path, "rb") as f:
+                        while True:
+                            # Check if ffmpeg is still running
+                            if proc.poll() is not None:
+                                # Read remaining data
+                                while True:
+                                    chunk = f.read(65536)
+                                    if not chunk:
+                                        break
+                                    size_hex = "%x\r\n" % len(chunk)
+                                    self.wfile.write(size_hex.encode())
+                                    self.wfile.write(chunk)
+                                    self.wfile.write(b"\r\n")
+                                    self.wfile.flush()
+                                break
+
+                            # Read available data
+                            pos = f.tell()
+                            f.seek(0, 2)  # Seek to end
+                            end_pos = f.tell()
+                            f.seek(pos)
+
+                            if end_pos > pos:
+                                chunk = f.read(end_pos - pos)
+                                if chunk:
+                                    size_hex = "%x\r\n" % len(chunk)
+                                    self.wfile.write(size_hex.encode())
+                                    self.wfile.write(chunk)
+                                    self.wfile.write(b"\r\n")
+                                    self.wfile.flush()
+                            else:
+                                time.sleep(0.25)
+
+                    self.wfile.write(b"0\r\n\r\n")
                     self.wfile.flush()
-
-                self.wfile.write(b"0\r\n\r\n")
-                self.wfile.flush()
 
             except (BrokenPipeError, ConnectionResetError, OSError):
                 log("Client disconnected for %s" % video_id)
             finally:
-                # Kill ffmpeg on disconnect
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=5)
-                except:
-                    try:
-                        proc.kill()
-                    except:
-                        pass
-
-                # Close cache file and mark as done
-                if cache_file:
-                    try:
-                        cache_file.close()
-                    except:
-                        pass
-                    # Mark in cache state if we got meaningful data
-                    cache_size = os.path.getsize(cache_file_path) if os.path.exists(cache_file_path) else 0
-                    if cache_size > 0:
-                        with cache_lock:
-                            cache_state[video_id] = {
-                                "file": cache_file_path,
-                                "size": cache_size,
-                                "done": True,
-                                "profile": profile_name,
-                            }
-                        log("Cached %s (%d bytes)" % (video_id, cache_size))
-                    else:
-                        # Remove empty cache file
-                        try:
-                            os.unlink(cache_file_path)
-                        except:
-                            pass
-
+                # Mark cache as done
+                if os.path.exists(cache_file_path):
+                    cache_size = os.path.getsize(cache_file_path)
+                    with cache_lock:
+                        cache_state[video_id] = {
+                            "file": cache_file_path,
+                            "size": cache_size,
+                            "done": True,
+                            "profile": profile_name,
+                        }
+                    log("Cache final: %s (%d bytes)" % (video_id, cache_size))
                 with streams_lock:
                     active_streams.pop(video_id, None)
-                log("Cleaned up ffmpeg for %s" % video_id)
         else:
             self.send_error(400, "Missing query parameters")
 
