@@ -132,7 +132,7 @@ def get_stream_urls(video_id):
 
 
 def start_ffmpeg(stream_urls, profile_name, video_id):
-    """Start ffmpeg to transcode and serve the stream."""
+    """Start ffmpeg to transcode and stream the video."""
     profile = PROFILES.get(profile_name, PROFILES[DEFAULT_PROFILE])
 
     # Build input args - one -i per stream URL
@@ -449,25 +449,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError, OSError):
                 log("Client disconnected for %s" % video_id)
             finally:
-                # Close cache file and mark as done
-                if cache_file:
-                    try:
-                        cache_file.close()
-                    except:
-                        pass
-                    # Mark in cache state
-                    with cache_lock:
-                        cache_state[video_id] = {
-                            "file": cache_file_path,
-                            "size": os.path.getsize(cache_file_path) if os.path.exists(cache_file_path) else 0,
-                            "done": True,
-                            "profile": profile_name,
-                        }
-                    log("Cached %s (%d bytes)" % (
-                        video_id,
-                        cache_state[video_id]["size"]
-                    ))
-
+                # Kill ffmpeg on disconnect
                 try:
                     proc.terminate()
                     proc.wait(timeout=5)
@@ -476,6 +458,31 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                         proc.kill()
                     except:
                         pass
+
+                # Close cache file and mark as done
+                if cache_file:
+                    try:
+                        cache_file.close()
+                    except:
+                        pass
+                    # Mark in cache state if we got meaningful data
+                    cache_size = os.path.getsize(cache_file_path) if os.path.exists(cache_file_path) else 0
+                    if cache_size > 0:
+                        with cache_lock:
+                            cache_state[video_id] = {
+                                "file": cache_file_path,
+                                "size": cache_size,
+                                "done": True,
+                                "profile": profile_name,
+                            }
+                        log("Cached %s (%d bytes)" % (video_id, cache_size))
+                    else:
+                        # Remove empty cache file
+                        try:
+                            os.unlink(cache_file_path)
+                        except:
+                            pass
+
                 with streams_lock:
                     active_streams.pop(video_id, None)
                 log("Cleaned up ffmpeg for %s" % video_id)
