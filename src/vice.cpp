@@ -507,7 +507,7 @@ shared_ptr<ViceContext> ViceContext::init(
         optionNames.data(),
         optionValues.data(),
         options.size(),
-        "Browservice",
+        "RetroWEBRebirth",
         &initErrorMsg
     );
 
