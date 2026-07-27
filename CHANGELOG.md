@@ -14,6 +14,7 @@
 
 ### Fixed
 - **ffmpeg orphan processes** — VSP now kills ffmpeg when the iMac client disconnects (BrokenPipeError handler).
+- **GitHub repo security** — All real IPs/credentials removed from docs, repos visibility updated (`RetroWEBRebirth` public, `browser-history-notion` private).
 
 ## [2026-07-27]
 
