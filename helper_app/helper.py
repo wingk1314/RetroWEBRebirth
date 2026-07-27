@@ -124,15 +124,17 @@ def launch_mplayer(stream_url, timeout):
     video_id = extract_video_id(stream_url)
     log("Playing stream: %s (id: %s)" % (stream_url, video_id))
 
-    # Use open -a to launch MPlayer OSX Extended with proper GUI
-    # This gives native video output, seek bar, controls, subtitles
-    try:
-        subprocess.Popen(["open", "-a", "MPlayer OSX Extended", stream_url])
-    except Exception, e:
-        log("Failed to open MPlayer Extended: %s" % str(e))
-        return None
-
-    time.sleep(3)
+    # Launch core mplayer binary directly with quartz output
+    cmd = [
+        MPLAYER_BIN,
+        '-cache', '8192',
+        '-framedrop',
+        '-vo', 'quartz',
+        '-ao', 'coreaudio',
+        stream_url,
+    ]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    time.sleep(2)
     pid = get_player_pid()
     if pid is None:
         log("Warning: Could not determine MPlayer PID")
@@ -141,7 +143,7 @@ def launch_mplayer(stream_url, timeout):
         active_streams[pid] = {"url": stream_url, "start": time.time(), "timeout": timeout}
     if timeout > 0:
         threading.Thread(target=monitor_stream, args=(pid,)).start()
-    log("Launched MPlayer Extended (pid %d) for %s" % (pid, video_id or stream_url))
+    log("Launched MPlayer (pid %d) for %s" % (pid, video_id or stream_url))
     return pid
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
