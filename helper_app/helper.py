@@ -125,16 +125,13 @@ def launch_mplayer(stream_url, timeout):
     log("Playing stream: %s (id: %s)" % (stream_url, video_id))
 
     # Launch core mplayer binary directly with quartz output
-    cmd = [
-        MPLAYER_BIN,
-        '-cache', '8192',
-        '-framedrop',
-        '-vo', 'quartz',
-        '-ao', 'coreaudio',
-        stream_url,
-    ]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    time.sleep(2)
+    # Launch via open -a to create window with display connection
+    try:
+        subprocess.Popen(["open", "-a", "MPlayer OSX Extended", stream_url])
+    except Exception, e:
+        log("Failed to open MPlayer: %s" % str(e))
+        return None
+    time.sleep(3)
     pid = get_player_pid()
     if pid is None:
         log("Warning: Could not determine MPlayer PID")
