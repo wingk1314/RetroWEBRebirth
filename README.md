@@ -2,7 +2,7 @@
 
 A modded version of [Browservice](https://github.com/ttalvitie/browservice) that adds YouTube video streaming to the iMac G4 (OS X 10.5 Leopard, PowerPC G4).
 
-Browservice renders modern web pages (like YouTube) on a Linux server using Chromium, then streams the viewport as images to the old browser on the iMac G4. This mod adds **real video playback** — clicking a YouTube video opens MPlayer on the iMac and plays the video with seeking support.
+Browservice renders modern web pages (like YouTube) on a Linux server using Chromium, then streams the viewport as images to the old browser on the iMac G4. This mod adds **real video playback** — clicking the red play button opens MPlayer on the iMac and plays the video with seeking support. YouTube videos also **auto-pause** in the browser when navigating to them (K key sent via CEF on address change).
 
 ## What's Included
 
@@ -10,7 +10,7 @@ Browservice renders modern web pages (like YouTube) on a Linux server using Chro
 |-----------|----------|-------------|
 | **Browservice** | `src/` | Web proxy server (CEF 144, compiled for Linux) |
 | **VSP** | `helper_app/vsp_replacement.py` | Transcodes YouTube videos to MPEG-TS via yt-dlp + ffmpeg |
-| **Helper** | `helper_app/helper.py` | Runs on iMac G4, launches MPlayer when Browservice detects a video |
+| **Helper** | `helper_app/helper.py` | Runs on iMac G4, launches MPlayer when the red play button is clicked |
 | **Resolution Picker** | Built into VSP | Web UI to change streaming quality (720p/480p/360p/240p/144p) |
 
 ## Architecture
@@ -44,13 +44,14 @@ Browservice renders modern web pages (like YouTube) on a Linux server using Chro
 ## How Video Streaming Works
 
 1. User browses YouTube via Browservice on the iMac G4
-2. Clicks the **red play button** in the Browservice control bar
-3. Browservice sends the video URL to the **Helper** (port 9999)
-4. Helper launches **MPlayer OSX Extended** on the iMac
-5. MPlayer connects to the **VSP** (port 33000) on the Linux server
-6. VSP uses **yt-dlp** to extract stream URLs, then **ffmpeg** to transcode to **MPEG-TS** (mpeg2video + mp2, G4-friendly codecs)
-7. VSP serves the TS file with a **fake Content-Length** (estimated from duration × bitrate), enabling MPlayer's seek bar
-8. MPlayer plays the video with seeking support
+2. **YouTube auto-pause:** When navigating to a YouTube video, Browservice detects the URL change via `OnAddressChange` and sends a K keypress to pause the video (debounced to avoid pausing on seeks)
+3. User clicks the **red play button** in the Browservice control bar
+4. Browservice sends the video URL to the **Helper** (port 9999)
+5. Helper launches **MPlayer OSX Extended** on the iMac
+6. MPlayer connects to the **VSP** (port 33000) on the Linux server
+7. VSP uses **yt-dlp** to extract stream URLs, then **ffmpeg** to transcode to **MPEG-TS** (mpeg2video + mp2, G4-friendly codecs)
+8. VSP serves the TS file with a **fake Content-Length** (estimated from duration × bitrate), enabling MPlayer's seek bar
+9. MPlayer plays the video with seeking support
 
 ## Setup
 
