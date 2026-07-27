@@ -25,11 +25,11 @@ Browservice renders modern web pages (like YouTube) on a Linux server using Chro
 │  Helper (port 9999) ──► MPlayer OSX Extended            │
 │                              │                          │
 │                              ▼                          │
-│                     http://192.168.0.130:33000          │
+│                     http://SERVER_IP:33000          │
 └──────────────────────────────────────┼──────────────────┘
                                        │
 ┌──────────────────────────────────────┼──────────────────┐
-│  Linux Server (192.168.0.130)                           │
+│  Linux Server (SERVER_IP)                           │
 │                                                         │
 │  Browservice (port 8080) ◄── iMac browser               │
 │      │                                                  │
@@ -65,7 +65,7 @@ Browservice renders modern web pages (like YouTube) on a Linux server using Chro
 ### 1. Build Browservice on Linux
 
 ```bash
-# On the Linux server (192.168.0.130)
+# On the Linux server (SERVER_IP)
 cd ~/browservice
 make
 ```
@@ -76,20 +76,20 @@ See `BUILD.md` for detailed build instructions.
 
 ```bash
 # Copy VSP to Linux server
-scp helper_app/vsp_replacement.py rk@192.168.0.130:~/browservice/vsp_replacement.py
+scp helper_app/vsp_replacement.py user@SERVER_IP:~/browservice/vsp_replacement.py
 
 # Start VSP
-ssh rk@192.168.0.130 'nohup python3 ~/browservice/vsp_replacement.py --port 33000 --profile 720p > /tmp/vsp.log 2>&1 &'
+ssh user@SERVER_IP 'nohup python3 ~/browservice/vsp_replacement.py --port 33000 --profile 720p > /tmp/vsp.log 2>&1 &'
 ```
 
 ### 3. Deploy the Helper on iMac G4
 
 ```bash
 # Copy helper to iMac
-scp helper_app/helper.py rk@192.168.0.100:~/helper.py
+scp helper_app/helper.py user@IMAC_IP:~/helper.py
 
 # Start helper
-ssh rk@192.168.0.100 'nohup python ~/helper.py --port 9999 > /tmp/helper.log 2>&1 &'
+ssh user@IMAC_IP 'nohup python ~/helper.py --port 9999 > /tmp/helper.log 2>&1 &'
 ```
 
 ### 4. Start Browservice
@@ -99,9 +99,9 @@ ssh rk@192.168.0.100 'nohup python ~/helper.py --port 9999 > /tmp/helper.log 2>&
 cd ~/browservice
 nohup ./release/bin/browservice \
   --vlc-enabled=YES \
-  --vlc-client-ip=192.168.0.100 \
+  --vlc-client-ip=IMAC_IP \
   --vlc-helper-port=9999 \
-  --vsp-server=http://192.168.0.130:33000 \
+  --vsp-server=http://SERVER_IP:33000 \
   --vsp-profile=default \
   --vlc-timeout=300 \
   --start-page=https://www.google.com \
@@ -111,7 +111,7 @@ nohup ./release/bin/browservice \
 
 ### 5. Access from iMac G4
 
-Open `http://192.168.0.130:8080` in the iMac's browser.
+Open `http://SERVER_IP:8080` in the iMac's browser.
 
 - **Resolution picker** loads first — select your quality (default: 720p)
 - Navigate to YouTube, find a video, click the **red play button** in the control bar
@@ -147,7 +147,7 @@ The iMac G4 has no hardware H.264 decoder. MPEG-2 Video and MP2 audio are the mo
 
 | Problem | Fix |
 |---------|-----|
-| MPlayer doesn't open | Check helper is running: `ssh rk@192.168.0.100 'cat /tmp/helper.log'` |
+| MPlayer doesn't open | Check helper is running: `ssh user@IMAC_IP 'cat /tmp/helper.log'` |
 | Video plays but no seek bar | VSP may not have finished transcoding — wait 10-30s |
 | Forward seek ends video | The video is short — try a longer video |
 | "Connection refused" from MPlayer | VSP may have stopped — restart it |

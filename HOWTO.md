@@ -50,10 +50,10 @@ The VSP transcodes YouTube videos to G4-compatible formats on the Linux server.
 
 ```bash
 # Copy VSP to Linux server
-scp helper_app/vsp_replacement.py rk@SERVER_IP:~/browservice/vsp_replacement.py
+scp helper_app/vsp_replacement.py user@SERVER_IP:~/browservice/vsp_replacement.py
 
 # Start VSP
-ssh rk@SERVER_IP 'nohup python3 ~/browservice/vsp_replacement.py \
+ssh user@SERVER_IP 'nohup python3 ~/browservice/vsp_replacement.py \
   --port 33000 --profile 720p > /tmp/vsp.log 2>&1 &'
 
 # Verify it's running
@@ -76,10 +76,10 @@ The helper runs on the iMac and launches MPlayer when Browservice detects a vide
 
 ```bash
 # Copy helper to iMac
-scp helper_app/helper.py rk@IMAC_IP:~/helper.py
+scp helper_app/helper.py user@IMAC_IP:~/helper.py
 
 # Start helper
-ssh rk@IMAC_IP 'nohup python ~/helper.py --port 9999 > /tmp/helper.log 2>&1 &'
+ssh user@IMAC_IP 'nohup python ~/helper.py --port 9999 > /tmp/helper.log 2>&1 &'
 
 # Verify
 curl http://IMAC_IP:9999/status
@@ -88,7 +88,7 @@ curl http://IMAC_IP:9999/status
 ## Step 5: Start Browservice
 
 ```bash
-ssh rk@SERVER_IP '
+ssh user@SERVER_IP '
 cd ~/browservice
 nohup ./release/bin/browservice \
   --vlc-enabled=YES \
@@ -122,10 +122,10 @@ Click the **Home** button in the Browservice control bar to return to the resolu
 curl http://IMAC_IP:9999/status
 
 # Check helper logs
-ssh rk@IMAC_IP 'cat /tmp/helper.log'
+ssh user@IMAC_IP 'cat /tmp/helper.log'
 
 # Restart helper
-ssh rk@IMAC_IP 'killall -9 Python; sleep 1; nohup python ~/helper.py --port 9999 > /tmp/helper.log 2>&1 &'
+ssh user@IMAC_IP 'killall -9 Python; sleep 1; nohup python ~/helper.py --port 9999 > /tmp/helper.log 2>&1 &'
 ```
 
 ## VSP Commands
@@ -135,10 +135,10 @@ ssh rk@IMAC_IP 'killall -9 Python; sleep 1; nohup python ~/helper.py --port 9999
 curl http://SERVER_IP:33000/status
 
 # Check VSP logs
-ssh rk@SERVER_IP 'tail -20 /tmp/vsp.log'
+ssh user@SERVER_IP 'tail -20 /tmp/vsp.log'
 
 # Restart VSP
-ssh rk@SERVER_IP 'killall -9 python3 ffmpeg; sleep 1; nohup python3 ~/browservice/vsp_replacement.py --port 33000 --profile 720p > /tmp/vsp.log 2>&1 &'
+ssh user@SERVER_IP 'killall -9 python3 ffmpeg; sleep 1; nohup python3 ~/browservice/vsp_replacement.py --port 33000 --profile 720p > /tmp/vsp.log 2>&1 &'
 ```
 
 ## Troubleshooting
@@ -146,8 +146,8 @@ ssh rk@SERVER_IP 'killall -9 python3 ffmpeg; sleep 1; nohup python3 ~/browservic
 ### MPlayer doesn't open when clicking play
 
 1. Check helper is running: `curl http://IMAC_IP:9999/status`
-2. Check helper logs: `ssh rk@IMAC_IP 'tail -20 /tmp/helper.log'`
-3. Check Browservice can reach the helper: `ssh rk@SERVER_IP 'curl -s http://IMAC_IP:9999/status'`
+2. Check helper logs: `ssh user@IMAC_IP 'tail -20 /tmp/helper.log'`
+3. Check Browservice can reach the helper: `ssh user@SERVER_IP 'curl -s http://IMAC_IP:9999/status'`
 
 ### Video plays but no sound
 
@@ -163,14 +163,14 @@ This is normal for short videos. The video only has a few seconds of content. Tr
 
 The VSP may have stopped. Restart it:
 ```bash
-ssh rk@SERVER_IP 'nohup python3 ~/browservice/vsp_replacement.py --port 33000 --profile 720p > /tmp/vsp.log 2>&1 &'
+ssh user@SERVER_IP 'nohup python3 ~/browservice/vsp_replacement.py --port 33000 --profile 720p > /tmp/vsp.log 2>&1 &'
 ```
 
 ### Black screen in MPlayer
 
 Kill MPlayer and try again. The display connection may have failed on launch:
 ```bash
-ssh rk@IMAC_IP 'killall -9 mplayer'
+ssh user@IMAC_IP 'killall -9 mplayer'
 ```
 Then click play again.
 
@@ -178,20 +178,20 @@ Then click play again.
 
 Check if CEF is installed:
 ```bash
-ssh rk@SERVER_IP 'ls ~/browservice/release/bin/retrojsvice.so'
+ssh user@SERVER_IP 'ls ~/browservice/release/bin/retrojsvice.so'
 ```
 If missing, run `make` in the browservice directory to rebuild.
 
 ## Network Diagram
 
 ```
-Router (192.168.0.x)
-├── iMac G4 (192.168.0.100)
-│   ├── Browser → http://192.168.0.130:8080 (Browservice)
+Router (192.168.x.x)
+├── iMac G4 (IMAC_IP)
+│   ├── Browser → http://SERVER_IP:8080 (Browservice)
 │   ├── Helper → port 9999 (launches MPlayer)
-│   └── MPlayer → http://192.168.0.130:33000 (VSP)
+│   └── MPlayer → http://SERVER_IP:33000 (VSP)
 │
-└── Linux Server (192.168.0.130)
+└── Linux Server (SERVER_IP)
     ├── Browservice → port 8080 (web proxy)
     ├── VSP → port 33000 (video transcoding)
     └── Xvfb → virtual display for Chromium

@@ -64,7 +64,7 @@ cd browservice
 Edit `vlc-youtube.sh` and set the VintageStreamProxy server address:
 
 ```bash
-VSP_SERVER="http://192.168.1.100:33000"
+VSP_SERVER="http://SERVER_IP:33000"
 ```
 
 ## Usage
