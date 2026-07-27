@@ -531,6 +531,14 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                                 self.wfile.write(chunk)
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     log("Client disconnected (cache serve)")
+                    with streams_lock:
+                        proc = active_streams.pop(video_id, None)
+                    if proc:
+                        try:
+                            proc.terminate()
+                            log("Killed ffmpeg for %s" % video_id)
+                        except:
+                            pass
                 return
 
             # First play - stream via chunked encoding (plays immediately)
@@ -646,6 +654,14 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
 
             except (BrokenPipeError, ConnectionResetError, OSError):
                 log("Client disconnected for %s" % video_id)
+                with streams_lock:
+                    proc = active_streams.pop(video_id, None)
+                if proc:
+                    try:
+                        proc.terminate()
+                        log("Killed ffmpeg for %s" % video_id)
+                    except:
+                        pass
             finally:
                 # Mark cache as done
                 if os.path.exists(cache_file_path):
