@@ -198,6 +198,34 @@ optional<string> extractDomainFromHTTPSURL(string url) {
 }
 }
 
+// Handler to block YouTube video stream requests (prevents autoplay)
+class BlockMediaHandler : public CefResourceRequestHandler {
+public:
+    BlockMediaHandler() {}
+
+    ReturnValue OnBeforeResourceLoad(
+        CefRefPtr<CefBrowser> browser,
+        CefRefPtr<CefFrame> frame,
+        CefRefPtr<CefRequest> request,
+        CefRefPtr<CefCallback> callback
+    ) override {
+        CEF_REQUIRE_IO_THREAD();
+
+        string url = string(request->GetURL());
+
+        // Block YouTube video stream requests to prevent in-browser autoplay
+        // These are the actual video/audio stream URLs that the player fetches
+        if(url.find("googlevideo.com/videoplayback") != string::npos) {
+            INFO_LOG("BLOCKED video stream: ", url.substr(0, 100));
+            return RV_CANCEL;
+        }
+
+        return RV_CONTINUE;
+    }
+
+    IMPLEMENT_REFCOUNTING(BlockMediaHandler);
+};
+
 class Window::Client :
     public CefClient,
     public CefLifeSpanHandler,
@@ -591,6 +619,19 @@ public:
         CEF_REQUIRE_IO_THREAD();
 
         postTask(window_, &Window::updateSecurityStatus_);
+
+        // Block YouTube video streams to prevent autoplay
+        // Only activate when VLC/media player is enabled (user wants external player)
+        if(globals->config->vlcEnabled) {
+            string url = string(request->GetURL());
+            string lower = url;
+            transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+            if(lower.find("youtube.com") != string::npos ||
+               lower.find("googlevideo.com") != string::npos) {
+                return new BlockMediaHandler();
+            }
+        }
+
         return nullptr;
     }
 
