@@ -158,7 +158,7 @@ The iMac G4 has no hardware H.264 decoder. MPEG-2 Video and MP2 audio are the mo
 - [VintageStreamProxy](https://github.com/nickoala/vintage-stream-proxy) — original VSP concept
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) — YouTube stream extraction
 - [ffmpeg](https://ffmpeg.org/) — video transcoding
-- [MPlayer OSX Extended](https://mplayerosxext.sourceforge.net/) — media player for OS X
+- [MPlayer OSX Extended](https://macintoshgarden.org/apps/mplayer-os-x) — media player for OS X
 
 ## License
 
