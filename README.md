@@ -2,7 +2,7 @@
 
 A modded version of [Browservice](https://github.com/ttalvitie/browservice) that adds YouTube video streaming to the iMac G4 (OS X 10.5 Leopard, PowerPC G4).
 
-Browservice renders modern web pages (like YouTube) on a Linux server using Chromium, then streams the viewport as images to the old browser on the iMac G4. This mod adds **real video playback** — clicking the red play button opens MPlayer on the iMac and plays the video with seeking support. YouTube videos also **auto-pause** in the browser when navigating to them (K key sent via CEF on address change).
+Browservice renders modern web pages (like YouTube) on a Linux server using Chromium, then streams the viewport as images to the old browser on the iMac G4. This mod adds **real video playback** — clicking the red play button opens MPlayer on the iMac and plays the video with seeking support.
 
 ## What's Included
 
@@ -44,14 +44,13 @@ Browservice renders modern web pages (like YouTube) on a Linux server using Chro
 ## How Video Streaming Works
 
 1. User browses YouTube via Browservice on the iMac G4
-2. **YouTube auto-pause:** When navigating to a YouTube video, Browservice detects the URL change via `OnAddressChange` and sends a K keypress to pause the video (debounced to avoid pausing on seeks)
-3. User clicks the **red play button** in the Browservice control bar
-4. Browservice sends the video URL to the **Helper** (port 9999)
-5. Helper launches **MPlayer OSX Extended** on the iMac
-6. MPlayer connects to the **VSP** (port 33000) on the Linux server
-7. VSP uses **yt-dlp** to extract stream URLs, then **ffmpeg** to transcode to **MPEG-TS** (mpeg2video + mp2, G4-friendly codecs)
-8. VSP serves the TS file with a **fake Content-Length** (estimated from duration × bitrate), enabling MPlayer's seek bar
-9. MPlayer plays the video with seeking support
+2. User clicks the **red play button** in the Browservice control bar
+3. Browservice sends the video URL to the **Helper** (port 9999)
+4. Helper launches **MPlayer OSX Extended** on the iMac
+5. MPlayer connects to the **VSP** (port 33000) on the Linux server
+6. VSP uses **yt-dlp** to extract stream URLs, then **ffmpeg** to transcode to **MPEG-TS** (mpeg2video + mp2, G4-friendly codecs)
+7. VSP serves the TS file with a **fake Content-Length** (estimated from duration × bitrate), enabling MPlayer's seek bar
+8. MPlayer plays the video with seeking support
 
 ## Setup
 
