@@ -34,46 +34,46 @@ PROFILES = {
         "scale": "1280:720",
         "video_bitrate": "2500k",
         "audio_bitrate": "128k",
-        "vcodec": "mpeg4",
-        "acodec": "aac",
-        "format": "mp4",
-        "extra": "-movflags +faststart",
+        "vcodec": "mpeg2video",
+        "acodec": "mp2",
+        "format": "mpegts",
+        "extra": "",
     },
     "480p": {
         "scale": "640:480",
         "video_bitrate": "1000k",
         "audio_bitrate": "128k",
-        "vcodec": "mpeg4",
-        "acodec": "aac",
-        "format": "mp4",
-        "extra": "-movflags +faststart",
+        "vcodec": "mpeg2video",
+        "acodec": "mp2",
+        "format": "mpegts",
+        "extra": "",
     },
     "360p": {
         "scale": "480:360",
         "video_bitrate": "500k",
         "audio_bitrate": "96k",
-        "vcodec": "mpeg4",
-        "acodec": "aac",
-        "format": "mp4",
-        "extra": "-movflags +faststart",
+        "vcodec": "mpeg2video",
+        "acodec": "mp2",
+        "format": "mpegts",
+        "extra": "",
     },
     "240p": {
         "scale": "320:240",
         "video_bitrate": "200k",
         "audio_bitrate": "64k",
-        "vcodec": "mpeg4",
-        "acodec": "aac",
-        "format": "mp4",
-        "extra": "-movflags +faststart",
+        "vcodec": "mpeg2video",
+        "acodec": "mp2",
+        "format": "mpegts",
+        "extra": "",
     },
     "144p": {
         "scale": "256:144",
         "video_bitrate": "100k",
         "audio_bitrate": "32k",
-        "vcodec": "mpeg4",
-        "acodec": "aac",
-        "format": "mp4",
-        "extra": "-movflags +faststart",
+        "vcodec": "mpeg2video",
+        "acodec": "mp2",
+        "format": "mpegts",
+        "extra": "",
     },
 }
 
@@ -93,7 +93,7 @@ cache_lock = threading.Lock()
 
 def get_cache_path(video_id, profile_name):
     """Get the file path for a cached video."""
-    return os.path.join(CACHE_DIR, "%s_%s.mp4" % (video_id, profile_name))
+    return os.path.join(CACHE_DIR, "%s_%s.ts" % (video_id, profile_name))
 
 
 def get_video_duration(video_id):
@@ -206,6 +206,8 @@ def start_ffmpeg(stream_urls, profile_name, video_id, output_path):
         "-ar", "44100",
         "-ac", "2",
         "-max_muxing_queue_size", "1024",
+        "-g", "50",
+        "-sc_threshold", "0",
     ]
 
     # Add extra flags (e.g., -movflags +faststart)
@@ -397,7 +399,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                     end = int(parts[1]) if parts[1] else file_size - 1
                     length = end - start + 1
                     self.send_response(206)
-                    self.send_header("Content-Type", "video/mp4")
+                    self.send_header("Content-Type", "video/mp2t")
                     self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, file_size))
                     self.send_header("Content-Length", str(length))
                     self.send_header("Accept-Ranges", "bytes")
@@ -414,7 +416,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                             remaining -= len(chunk)
                 else:
                     self.send_response(200)
-                    self.send_header("Content-Type", "video/mp4")
+                    self.send_header("Content-Type", "video/mp2t")
                     self.send_header("Content-Length", str(file_size))
                     self.send_header("Accept-Ranges", "bytes")
                     self.end_headers()
@@ -501,7 +503,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                         end = int(parts[1]) if parts[1] else file_size - 1
                         length = end - start + 1
                         self.send_response(206)
-                        self.send_header("Content-Type", "video/mp4")
+                        self.send_header("Content-Type", "video/mp2t")
                         self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, file_size))
                         self.send_header("Content-Length", str(length))
                         self.send_header("Accept-Ranges", "bytes")
@@ -517,7 +519,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                                 remaining -= len(chunk)
                     else:
                         self.send_response(200)
-                        self.send_header("Content-Type", "video/mp4")
+                        self.send_header("Content-Type", "video/mp2t")
                         self.send_header("Content-Length", str(file_size))
                         self.send_header("Accept-Ranges", "bytes")
                         self.end_headers()
@@ -562,43 +564,85 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
 
             threading.Thread(target=monitor_ffmpeg, daemon=True).start()
 
-            # Stream via chunked encoding (plays immediately, no seekbar)
-            log("Streaming live: %s" % video_id)
+            # Stream with fake Content-Length for MPlayer seeking
+            fake_size = estimated_size or 16000000  # fallback 16MB
+            log("Streaming live: %s (fake CL=%d)" % (video_id, fake_size))
             try:
-                self.send_response(200)
-                self.send_header("Content-Type", "video/mp4")
-                self.send_header("Transfer-Encoding", "chunked")
-                self.end_headers()
+                range_header = self.headers.get("Range")
+                real_size = os.path.getsize(cache_file_path) if os.path.exists(cache_file_path) else 0
 
-                with open(cache_file_path, "rb") as f:
+                if range_header:
+                    # Range request during live stream
+                    range_spec = range_header.replace("bytes=", "")
+                    parts = range_spec.split("-", 1)
+                    start = int(parts[0]) if parts[0] else 0
+                    end = int(parts[1]) if parts[1] and parts[1] else fake_size - 1
+
+                    if start >= real_size:
+                        # Wait up to 10s for data
+                        waited = 0
+                        while waited < 10:
+                            time.sleep(0.5)
+                            waited += 0.5
+                            real_size = os.path.getsize(cache_file_path) if os.path.exists(cache_file_path) else 0
+                            if start < real_size:
+                                break
+
+                    if start >= real_size:
+                        self.send_response(416)
+                        self.send_header("Content-Range", "bytes */%d" % fake_size)
+                        self.end_headers()
+                        return
+
+                    effective_end = min(end, real_size - 1) if real_size > 0 else real_size - 1
+                    length = effective_end - start + 1
+
+                    self.send_response(206)
+                    self.send_header("Content-Type", "video/mp2t")
+                    self.send_header("Content-Range", "bytes %d-%d/%d" % (start, effective_end, fake_size))
+                    self.send_header("Content-Length", str(length))
+                    self.send_header("Accept-Ranges", "bytes")
+                    self.end_headers()
+
+                    with open(cache_file_path, "rb") as f:
+                        f.seek(start)
+                        remaining = length
+                        while remaining > 0:
+                            chunk = f.read(min(65536, remaining))
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                            remaining -= len(chunk)
+                else:
+                    # No range — serve from beginning with fake CL
+                    self.send_response(200)
+                    self.send_header("Content-Type", "video/mp2t")
+                    self.send_header("Content-Length", str(fake_size))
+                    self.send_header("Accept-Ranges", "bytes")
+                    self.end_headers()
+
+                    offset = 0
                     while True:
-                        pos = f.tell()
-                        f.seek(0, 2)
-                        end_pos = f.tell()
-                        f.seek(pos)
-
-                        if end_pos > pos:
-                            chunk = f.read(min(end_pos - pos, 65536))
-                            if chunk:
-                                self.wfile.write(("%x\r\n" % len(chunk)).encode())
-                                self.wfile.write(chunk)
-                                self.wfile.write(b"\r\n")
-                                self.wfile.flush()
+                        real_size = os.path.getsize(cache_file_path) if os.path.exists(cache_file_path) else 0
+                        if offset < real_size:
+                            with open(cache_file_path, "rb") as f:
+                                f.seek(offset)
+                                chunk = f.read(min(65536, real_size - offset))
+                                if chunk:
+                                    self.wfile.write(chunk)
+                                    offset += len(chunk)
                         else:
                             if proc.poll() is not None:
-                                while True:
-                                    chunk = f.read(65536)
-                                    if not chunk:
-                                        break
-                                    self.wfile.write(("%x\r\n" % len(chunk)).encode())
-                                    self.wfile.write(chunk)
-                                    self.wfile.write(b"\r\n")
-                                    self.wfile.flush()
+                                # ffmpeg done, drain remaining
+                                with open(cache_file_path, "rb") as f:
+                                    f.seek(offset)
+                                    while True:
+                                        chunk = f.read(65536)
+                                        if not chunk:
+                                            break
+                                        self.wfile.write(chunk)
                                 break
                             time.sleep(0.25)
-
-                self.wfile.write(b"0\r\n\r\n")
-                self.wfile.flush()
 
             except (BrokenPipeError, ConnectionResetError, OSError):
                 log("Client disconnected for %s" % video_id)
