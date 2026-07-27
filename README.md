@@ -1,4 +1,4 @@
-# RetroREBIRTH — Browservice for iMac G4
+# RetroWEBRebirth — Browservice for iMac G4
 
 A modded version of [Browservice](https://github.com/ttalvitie/browservice) that adds YouTube video streaming to the iMac G4 (OS X 10.5 Leopard, PowerPC G4).
 
