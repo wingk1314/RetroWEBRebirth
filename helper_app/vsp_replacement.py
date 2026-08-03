@@ -159,6 +159,11 @@ DIRECT_URL_TTL = 3600  # 1 hour (YouTube URLs expire ~6h)
 remux_url_cache = {}
 remux_url_lock = threading.Lock()
 
+# In-progress remuxes: (video_id, height) -> proc. Prevents concurrent
+# Range requests from restarting ffmpeg (-y would truncate the file).
+remux_procs = {}
+remux_procs_lock = threading.Lock()
+
 def get_remux_urls(video_id, height=720):
     """Resolve DASH video+audio URLs via yt-dlp for remux mode.
     YouTube only offers progressive (combined) as format 18 = 360p;
@@ -320,12 +325,21 @@ def serve_remux(handler, video_id, height=720):
     cache_dir = "/tmp/vsp_remux"
     os.makedirs(cache_dir, exist_ok=True)
     out_path = os.path.join(cache_dir, "%s_%dp.ts" % (video_id, height))
+    remux_key = (video_id, height)
 
     # Cache hit: remux already complete (file size near estimate = done)
     if os.path.exists(out_path) and est_size and os.path.getsize(out_path) >= est_size * 0.98:
         log("Remux cache hit: %s" % out_path)
         serve_file_with_range(handler, out_path, est_size=os.path.getsize(out_path))
         return
+
+    # In-progress remux: attach to existing ffmpeg instead of restarting
+    with remux_procs_lock:
+        existing = remux_procs.get(remux_key)
+        if existing is not None and existing.poll() is None:
+            log("Attaching to in-progress remux for %s (%dp)" % (video_id, height))
+            serve_file_with_range(handler, out_path, existing, video_id, est_size)
+            return
 
     cmd = ["ffmpeg", "-y", "-i", vurl]
     if aurl:
@@ -347,6 +361,9 @@ def serve_remux(handler, video_id, height=720):
         handler.send_error(500, "Remux start failed")
         return
 
+    with remux_procs_lock:
+        remux_procs[remux_key] = proc
+
     # Wait for initial buffer
     for _ in range(20):
         time.sleep(0.5)
@@ -364,6 +381,8 @@ def serve_remux(handler, video_id, height=720):
     # Monitor remux completion in background
     def monitor():
         proc.wait()
+        with remux_procs_lock:
+            remux_procs.pop(remux_key, None)
         log("Remux complete for %s (%d bytes)" % (video_id, os.path.getsize(out_path) if os.path.exists(out_path) else 0))
     threading.Thread(target=monitor, daemon=True).start()
 
@@ -434,12 +453,8 @@ def serve_file_with_range(handler, path, proc=None, video_id=None, est_size=None
                     sent += len(chunk)
     except (BrokenPipeError, ConnectionResetError, OSError):
         log("Client disconnected serving %s" % (video_id or path))
-        if proc:
-            try:
-                proc.terminate()
-                log("Killed remux for %s" % video_id)
-            except:
-                pass
+        # Do NOT kill the remux: let it finish so the cache completes
+        # (instant replays, full scrubbing). The monitor thread cleans up.
 
 
 def get_stream_urls(video_id):
