@@ -43,7 +43,7 @@ string vlcNotificationSignKey = generateDataURLSignKey();
 
 // Transcoding resolution options for VSP
 const vector<string> transcodeResolutions = {"144p", "240p", "360p", "480p", "720p"};
-int currentTranscodeResolutionIdx = 4; // Default: 720p
+int currentTranscodeResolutionIdx = 3; // Default: 480p
 
 string getCurrentTranscodeResolution() {
     return transcodeResolutions[currentTranscodeResolutionIdx];

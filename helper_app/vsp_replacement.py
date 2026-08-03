@@ -78,7 +78,7 @@ PROFILES = {
 }
 
 # Default profile
-DEFAULT_PROFILE = "720p"
+DEFAULT_PROFILE = "480p"
 
 # Active state
 active_profile = DEFAULT_PROFILE
