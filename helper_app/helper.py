@@ -12,10 +12,22 @@ from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
 from SocketServer import ThreadingMixIn
 
 # Preferred player: PowerVLC (modern VLC 3.0.24 port, H.264 AltiVec on G4).
-# Fallback: MPlayer OSX Extended (original pipeline).
+# Launch via the app binary directly with VLC-style CLI options -
+# `open -a` does NOT forward URLs/args on old macOS, but the binary
+# accepts standard VLC options like --play-and-exit.
 PLAYERS = [
-    {"name": "PowerVLC", "app": "PowerVLC", "proc": ["vlc", "powervlc"]},
-    {"name": "MPlayer OSX Extended", "app": "MPlayer OSX Extended", "proc": ["mplayer"]},
+    {
+        "name": "PowerVLC",
+        "bin": "/Applications/PowerVLC.app/Contents/MacOS/PowerVLC",
+        "proc": ["vlc", "powervlc"],
+        "args": ["--play-and-exit", "--no-video-title-show"],
+    },
+    {
+        "name": "MPlayer OSX Extended",
+        "app": "MPlayer OSX Extended",
+        "proc": ["mplayer"],
+        "args": [],
+    },
 ]
 VSP_HOST = "192.168.0.130"
 VSP_PORT = 33000
@@ -140,11 +152,16 @@ def launch_mplayer(stream_url, timeout):
     video_id = extract_video_id(stream_url)
     log("Playing stream: %s (id: %s)" % (stream_url, video_id))
 
-    # Launch the preferred player app (PowerVLC first, MPlayer fallback)
+    # Launch the preferred player (PowerVLC binary directly with VLC args,
+    # MPlayer via open -a as fallback)
     launched = None
     for player in PLAYERS:
         try:
-            subprocess.Popen(["open", "-a", player["app"], stream_url])
+            if player.get("bin") and os.path.exists(player["bin"]):
+                cmd = [player["bin"]] + player.get("args", []) + [stream_url]
+                subprocess.Popen(cmd)
+            else:
+                subprocess.Popen(["open", "-a", player["app"], stream_url])
             log("Opened %s with %s" % (stream_url, player["name"]))
             launched = player
             break
