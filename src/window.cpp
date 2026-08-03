@@ -1421,21 +1421,22 @@ void Window::sendCurrentURLToVLC() {
         vspServer.pop_back();
     }
 
-    // Build stream URL: try YouTube video ID first, otherwise pass full URL
+    // Build stream URL (direct passthrough mode for PowerVLC):
+    // try YouTube video ID first, otherwise pass full URL
     string streamUrl;
     string resolution = getCurrentTranscodeResolution();
     optional<string> videoID = extractYouTubeVideoID(url);
     if(videoID.has_value()) {
-        streamUrl = vspServer + "/" + globals->config->vspProfile
-                   + "?v=" + videoID.value()
-                   + "&resolution=" + resolution;
+        streamUrl = vspServer + "/direct"
+                  + "?v=" + videoID.value()
+                  + "&height=" + resolution;
         INFO_LOG("Manual VLC: YouTube video ", videoID.value(),
                  " at ", resolution);
     } else {
-        // Pass the full URL to VSP for non-YouTube sites
+        // Pass the full URL to VSP for non-YouTube sites (legacy transcode)
         streamUrl = vspServer + "/" + globals->config->vspProfile
-                   + "?url=" + string(CefURIEncode(url, false).ToString())
-                   + "&resolution=" + resolution;
+                  + "?url=" + string(CefURIEncode(url, false).ToString())
+                  + "&resolution=" + resolution;
         INFO_LOG("Manual VLC: generic URL ", url, " at ", resolution);
     }
 
