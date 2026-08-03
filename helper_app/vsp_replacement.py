@@ -13,6 +13,7 @@ Architecture:
 """
 
 import argparse
+import json
 import os
 import shutil
 import signal
@@ -154,7 +155,7 @@ direct_url_cache = {}
 direct_url_lock = threading.Lock()
 DIRECT_URL_TTL = 3600  # 1 hour (YouTube URLs expire ~6h)
 
-# Remux cache: video_id -> (video_url, audio_url, expiry_ts)
+# Remux cache: video_id -> (video_url, audio_url, est_size, expiry_ts)
 remux_url_cache = {}
 remux_url_lock = threading.Lock()
 
@@ -162,18 +163,19 @@ def get_remux_urls(video_id, height=720):
     """Resolve DASH video+audio URLs via yt-dlp for remux mode.
     YouTube only offers progressive (combined) as format 18 = 360p;
     anything higher is DASH: separate video-only and audio-only streams.
-    Returns (video_url, audio_url) or (None, None)."""
+    Returns (video_url, audio_url, est_size_bytes) or (None, None, None)."""
     with remux_url_lock:
         cached = remux_url_cache.get(video_id)
-        if cached and time.time() < cached[2]:
-            return cached[0], cached[1]
+        if cached and time.time() < cached[3]:
+            return cached[0], cached[1], cached[2]
     try:
+        fmt = "bestvideo[height<=%d][ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/best[height<=%d][ext=mp4][vcodec^=avc1]/best[height<=%d]" % (height, height, height)
         result = subprocess.run(
             [
                 "yt-dlp",
                 "--no-warnings",
-                "-f", "bestvideo[height<=%d][ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/best[height<=%d][ext=mp4][vcodec^=avc1]/best[height<=%d]" % (height, height, height),
-                "--get-url",
+                "-J",
+                "-f", fmt,
                 "--no-playlist",
                 "https://www.youtube.com/watch?v=%s" % video_id,
             ],
@@ -182,20 +184,31 @@ def get_remux_urls(video_id, height=720):
             timeout=30,
         )
         if result.returncode == 0:
-            urls = [u.strip() for u in result.stdout.strip().splitlines() if u.strip().startswith("http")]
-            if len(urls) >= 2:
-                with remux_url_lock:
-                    remux_url_cache[video_id] = (urls[0], urls[1], time.time() + DIRECT_URL_TTL)
-                log("Remux URLs resolved for %s (video len=%d, audio len=%d)" % (
-                    video_id, len(urls[0]), len(urls[1])))
-                return urls[0], urls[1]
-            elif len(urls) == 1:
+            info = json.loads(result.stdout)
+            if isinstance(info, dict) and "requested_formats" in info and len(info["requested_formats"]) >= 2:
+                vf = info["requested_formats"][0]
+                af = info["requested_formats"][1]
+                duration = info.get("duration") or 0
+                def fmt_size(f):
+                    if f.get("filesize"):
+                        return f["filesize"]
+                    if f.get("filesize_approx"):
+                        return f["filesize_approx"]
+                    tbr = f.get("tbr") or 0
+                    return int(tbr * duration / 8) if duration else 0
+                est_size = int((fmt_size(vf) + fmt_size(af)) * 1.05)  # TS container overhead
+                if est_size > 0 and vf.get("url") and af.get("url"):
+                    with remux_url_lock:
+                        remux_url_cache[video_id] = (vf["url"], af["url"], est_size, time.time() + DIRECT_URL_TTL)
+                    log("Remux URLs resolved for %s (est %d bytes)" % (video_id, est_size))
+                    return vf["url"], af["url"], est_size
+            elif isinstance(info, dict) and info.get("url") and info.get("filesize_approx"):
                 # Progressive fallback (e.g., format 18 only)
-                return urls[0], None
+                return info["url"], None, int(info["filesize_approx"] * 1.05)
         log("yt-dlp remux failed for %s: %s" % (video_id, result.stderr.strip()[:200]))
     except Exception as e:
         log("get_remux_urls error: %s" % str(e))
-    return None, None
+    return None, None, None
 
 def get_direct_url(video_id, height=360):
     """Resolve a single progressive (audio+video) URL via yt-dlp.
@@ -292,8 +305,13 @@ def serve_remux(handler, video_id, height=720):
     """Serve 720p/480p via remux: ffmpeg -c copy muxes DASH video+audio
     into MPEG-TS (no re-encode, near-zero CPU), served with Range support
     so PowerVLC can scrub. Falls back to direct passthrough (360p) if
-    DASH resolution is unavailable."""
-    vurl, aurl = get_remux_urls(video_id, height)
+    DASH resolution is unavailable.
+
+    Scrubbing strategy: report the ESTIMATED final file size as
+    Content-Length (duration x bitrate from yt-dlp metadata) so VLC shows
+    the full timeline, then follow the growing file and honor Range
+    requests at any position."""
+    vurl, aurl, est_size = get_remux_urls(video_id, height)
     if not vurl:
         log("Remux URL resolution failed for %s, falling back to direct" % video_id)
         serve_direct(handler, video_id, min(height, 360))
@@ -303,10 +321,10 @@ def serve_remux(handler, video_id, height=720):
     os.makedirs(cache_dir, exist_ok=True)
     out_path = os.path.join(cache_dir, "%s_%dp.ts" % (video_id, height))
 
-    # Only restart remux if file isn't already complete
-    if os.path.exists(out_path) and os.path.getsize(out_path) > 100000:
+    # Cache hit: remux already complete (file size near estimate = done)
+    if os.path.exists(out_path) and est_size and os.path.getsize(out_path) >= est_size * 0.98:
         log("Remux cache hit: %s" % out_path)
-        serve_file_with_range(handler, out_path)
+        serve_file_with_range(handler, out_path, est_size=os.path.getsize(out_path))
         return
 
     cmd = ["ffmpeg", "-y", "-i", vurl]
@@ -321,7 +339,7 @@ def serve_remux(handler, video_id, height=720):
         "-max_muxing_queue_size", "1024",
         out_path,
     ]
-    log("Starting remux for %s at %dp" % (video_id, height))
+    log("Starting remux for %s at %dp (est %d bytes)" % (video_id, height, est_size or 0))
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as e:
@@ -349,23 +367,41 @@ def serve_remux(handler, video_id, height=720):
         log("Remux complete for %s (%d bytes)" % (video_id, os.path.getsize(out_path) if os.path.exists(out_path) else 0))
     threading.Thread(target=monitor, daemon=True).start()
 
-    serve_file_with_range(handler, out_path, proc, video_id)
+    serve_file_with_range(handler, out_path, proc, video_id, est_size)
 
 
-def serve_file_with_range(handler, path, proc=None, video_id=None):
-    """Serve a (possibly still-growing) file with Range support."""
+def serve_file_with_range(handler, path, proc=None, video_id=None, est_size=None):
+    """Serve a (possibly still-growing) file with Range support.
+    If est_size is provided (estimated final size), it is sent as
+    Content-Length so players show the full timeline and can seek;
+    the stream follows the file as it grows. Without est_size, the
+    current file size is used (limited timeline for growing files)."""
     try:
-        file_size = os.path.getsize(path)
+        current_size = os.path.getsize(path)
+        # Use estimate when serving a growing file; actual when complete
+        if est_size and (proc is not None or current_size < est_size):
+            total = max(est_size, current_size)
+        else:
+            total = current_size
         range_header = handler.headers.get("Range")
         if range_header:
             range_spec = range_header.replace("bytes=", "")
             parts = range_spec.split("-")
             start = int(parts[0]) if parts[0] else 0
-            end = int(parts[1]) if parts[1] else file_size - 1
-            length = end - start + 1
+            end = int(parts[1]) if parts[1] else total - 1
+            # If requested beyond available data, wait for remux to catch up
+            if proc is not None:
+                wait_until = time.time() + 30
+                while os.path.getsize(path) <= start and time.time() < wait_until and proc.poll() is None:
+                    time.sleep(0.5)
+            avail = os.path.getsize(path)
+            if start >= avail and (proc is None or proc.poll() is not None):
+                handler.send_error(416, "Range not satisfiable")
+                return
+            length = min(end, avail - 1) - start + 1
             handler.send_response(206)
             handler.send_header("Content-Type", "video/mp2t")
-            handler.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, file_size))
+            handler.send_header("Content-Range", "bytes %d-%d/%d" % (start, start + length - 1, total))
             handler.send_header("Content-Length", str(length))
             handler.send_header("Accept-Ranges", "bytes")
             handler.end_headers()
@@ -379,17 +415,23 @@ def serve_file_with_range(handler, path, proc=None, video_id=None):
                     handler.wfile.write(chunk)
                     remaining -= len(chunk)
         else:
+            # Full stream: advertise estimated total, follow file growth
             handler.send_response(200)
             handler.send_header("Content-Type", "video/mp2t")
-            handler.send_header("Content-Length", str(file_size))
+            handler.send_header("Content-Length", str(total))
             handler.send_header("Accept-Ranges", "bytes")
             handler.end_headers()
             with open(path, "rb") as f:
-                while True:
+                sent = 0
+                while sent < total:
                     chunk = f.read(65536)
                     if not chunk:
+                        if proc is not None and proc.poll() is None:
+                            time.sleep(0.5)
+                            continue
                         break
                     handler.wfile.write(chunk)
+                    sent += len(chunk)
     except (BrokenPipeError, ConnectionResetError, OSError):
         log("Client disconnected serving %s" % (video_id or path))
         if proc:
