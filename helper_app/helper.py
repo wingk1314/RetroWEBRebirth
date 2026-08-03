@@ -1,16 +1,22 @@
 #!/usr/bin/env python
 from __future__ import with_statement
 """
-Browservice MPlayer Helper - CLI Mode
+Browservice Helper - CLI Mode
 Runs as a simple HTTP server on OS X Leopard (10.5).
-Receives HTTP requests from Browservice to launch MPlayer OSX Extended with a stream URL.
+Receives HTTP requests from Browservice to launch PowerVLC (or MPlayer OSX
+Extended as fallback) with a stream URL.
 Python 2.5 compatible.
 """
 import os, signal, subprocess, sys, threading, time, optparse, cgi, urlparse
 from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
 from SocketServer import ThreadingMixIn
 
-MPLAYER_BIN = "/Applications/MPlayer OSX Extended.app/Contents/Resources/Binaries/mpextended.mpBinaries/Contents/mpextended.mpBinaries/Contents/MacOS/mplayer"
+# Preferred player: PowerVLC (modern VLC 3.0.24 port, H.264 AltiVec on G4).
+# Fallback: MPlayer OSX Extended (original pipeline).
+PLAYERS = [
+    {"name": "PowerVLC", "app": "PowerVLC", "proc": ["vlc", "powervlc"]},
+    {"name": "MPlayer OSX Extended", "app": "MPlayer OSX Extended", "proc": ["mplayer"]},
+]
 VSP_HOST = "192.168.0.130"
 VSP_PORT = 33000
 
@@ -35,11 +41,21 @@ def log(msg):
     print "[%s] %s" % (time.strftime("%H:%M:%S"), msg)
     sys.stdout.flush()
 
+def is_player_proc(line):
+    l = line.lower()
+    if 'grep' in l or 'helper.py' in l:
+        return False
+    for p in PLAYERS:
+        for name in p["proc"]:
+            if name in l:
+                return True
+    return False
+
 def kill_existing_player():
     try:
         out = subprocess.Popen(['ps', 'aux'], stdout=subprocess.PIPE).communicate()[0]
         for line in out.splitlines():
-            if 'mplayer' in line.lower() and 'grep' not in line:
+            if is_player_proc(line):
                 parts = line.split()
                 if len(parts) >= 2:
                     try: os.kill(int(parts[1]), signal.SIGTERM)
@@ -50,7 +66,7 @@ def get_player_pid():
     try:
         out = subprocess.Popen(['ps', 'aux'], stdout=subprocess.PIPE).communicate()[0]
         for line in out.splitlines():
-            if 'mplayer' in line.lower() and 'grep' not in line:
+            if is_player_proc(line):
                 parts = line.split()
                 if len(parts) >= 2:
                     try: return int(parts[1])
@@ -124,23 +140,30 @@ def launch_mplayer(stream_url, timeout):
     video_id = extract_video_id(stream_url)
     log("Playing stream: %s (id: %s)" % (stream_url, video_id))
 
-    # Launch core mplayer binary directly with quartz output
-    # Launch via open -a to create window with display connection
-    try:
-        subprocess.Popen(["open", "-a", "MPlayer OSX Extended", stream_url])
-    except Exception, e:
-        log("Failed to open MPlayer: %s" % str(e))
+    # Launch the preferred player app (PowerVLC first, MPlayer fallback)
+    launched = None
+    for player in PLAYERS:
+        try:
+            subprocess.Popen(["open", "-a", player["app"], stream_url])
+            log("Opened %s with %s" % (stream_url, player["name"]))
+            launched = player
+            break
+        except Exception, e:
+            log("Failed to open %s: %s" % (player["name"], str(e)))
+    if launched is None:
+        log("No player app could be launched")
         return None
+
     time.sleep(3)
     pid = get_player_pid()
     if pid is None:
-        log("Warning: Could not determine MPlayer PID")
+        log("Warning: Could not determine player PID")
         return None
     with streams_lock:
         active_streams[pid] = {"url": stream_url, "start": time.time(), "timeout": timeout}
     if timeout > 0:
         threading.Thread(target=monitor_stream, args=(pid,)).start()
-    log("Launched MPlayer (pid %d) for %s" % (pid, video_id or stream_url))
+    log("Launched %s (pid %d) for %s" % (launched["name"], pid, video_id or stream_url))
     return pid
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):

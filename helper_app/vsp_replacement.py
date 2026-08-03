@@ -142,6 +142,109 @@ def log(msg):
     print("[%s] %s" % (ts, msg), flush=True)
 
 
+# ---------------------------------------------------------------------------
+# Direct passthrough mode (PowerVLC): no transcoding, Range-forwarding proxy.
+# YouTube CDN supports HTTP Range natively, so PowerVLC gets true scrubbing
+# on first play — VSP just resolves the direct progressive URL and relays
+# byte ranges between PowerVLC and the CDN.
+# ---------------------------------------------------------------------------
+
+# Cache of resolved direct URLs: video_id -> (url, expiry_ts)
+direct_url_cache = {}
+direct_url_lock = threading.Lock()
+DIRECT_URL_TTL = 3600  # 1 hour (YouTube URLs expire ~6h)
+
+def get_direct_url(video_id, height=360):
+    """Resolve a single progressive (audio+video) URL via yt-dlp.
+    Format 18 is the only combined format (360p H.264+AAC)."""
+    with direct_url_lock:
+        cached = direct_url_cache.get(video_id)
+        if cached and time.time() < cached[1]:
+            return cached[0]
+    try:
+        result = subprocess.run(
+            [
+                "yt-dlp",
+                "--no-warnings",
+                "-f", "18/best[height<=%d][ext=mp4]/best" % height,
+                "--get-url",
+                "--no-playlist",
+                "https://www.youtube.com/watch?v=%s" % video_id,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            url = result.stdout.strip().splitlines()[0].strip()
+            if url.startswith("http"):
+                with direct_url_lock:
+                    direct_url_cache[video_id] = (url, time.time() + DIRECT_URL_TTL)
+                log("Direct URL resolved for %s (len=%d)" % (video_id, len(url)))
+                return url
+        else:
+            log("yt-dlp direct failed for %s: %s" % (video_id, result.stderr.strip()[:200]))
+    except Exception as e:
+        log("get_direct_url error: %s" % str(e))
+    return None
+
+
+def serve_direct(handler, video_id, height=360):
+    """Serve a direct passthrough stream with Range forwarding.
+    PowerVLC sends Range requests (scrubbing) -> we forward to CDN -> relay 206."""
+    url = get_direct_url(video_id, height)
+    if not url:
+        handler.send_error(502, "Failed to resolve direct stream URL")
+        return
+
+    # Forward the client's Range header to the CDN
+    headers = {
+        "User-Agent": "PowerVLC/1.1.0 LibPowerVLC/1.1.0",
+    }
+    range_header = handler.headers.get("Range")
+    if range_header:
+        headers["Range"] = range_header
+        log("Forwarding Range: %s for %s" % (range_header, video_id))
+
+    try:
+        import urllib.request
+        req = urllib.request.Request(url, headers=headers)
+        resp = urllib.request.urlopen(req, timeout=30)
+    except Exception as e:
+        log("CDN request failed for %s: %s" % (video_id, str(e)))
+        handler.send_error(502, "CDN request failed")
+        return
+
+    status = resp.status if hasattr(resp, "status") else resp.getcode()
+    ctype = resp.headers.get("Content-Type", "video/mp4")
+    clen = resp.headers.get("Content-Length")
+    crange = resp.headers.get("Content-Range")
+    accept_ranges = resp.headers.get("Accept-Ranges", "bytes")
+
+    handler.send_response(status)
+    handler.send_header("Content-Type", ctype)
+    handler.send_header("Accept-Ranges", accept_ranges)
+    if crange:
+        handler.send_header("Content-Range", crange)
+    if clen:
+        handler.send_header("Content-Length", clen)
+    handler.end_headers()
+
+    try:
+        while True:
+            chunk = resp.read(65536)
+            if not chunk:
+                break
+            handler.wfile.write(chunk)
+    except (BrokenPipeError, ConnectionResetError, OSError):
+        log("Client disconnected during direct stream %s" % video_id)
+    finally:
+        try:
+            resp.close()
+        except:
+            pass
+
+
 def get_stream_urls(video_id):
     """Use yt-dlp to extract stream URLs (video + audio separate)."""
     try:
@@ -361,6 +464,26 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             with streams_lock:
                 count = len(active_streams)
             self.wfile.write(('%s' % {"profile": active_profile, "streams": count, "cached": cached_count}).encode())
+            return
+
+        # Direct passthrough: /direct?v=<video_id>&height=360
+        if path.startswith("/direct"):
+            params = {}
+            query = path.split("?", 1)[1] if "?" in path else ""
+            for pair in query.split("&"):
+                if "=" in pair:
+                    k, v = pair.split("=", 1)
+                    params[k] = v
+            video_id = params.get("v")
+            if not video_id:
+                self.send_error(400, "Missing video ID")
+                return
+            try:
+                height = int(params.get("height", "360").rstrip("p"))
+            except:
+                height = 360
+            log("Direct passthrough request: video_id=%s height=%dp" % (video_id, height))
+            serve_direct(self, video_id, height)
             return
 
         # Stream request: /<profile>?v=<video_id>&resolution=720p

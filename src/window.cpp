@@ -664,15 +664,15 @@ public:
                     return false;
                 }
 
-                // Build VSP stream URL
+                // Build VSP stream URL (direct passthrough mode for PowerVLC)
                 string vspServer = globals->config->vspServer;
                 if(!vspServer.empty() && vspServer.back() == '/') {
                     vspServer.pop_back();
                 }
                 string resolution = getCurrentTranscodeResolution();
-                string streamUrl = vspServer + "/" + globals->config->vspProfile
+                string streamUrl = vspServer + "/direct"
                                  + "?v=" + videoID.value()
-                                 + "&resolution=" + resolution;
+                                 + "&height=" + resolution;
                 string encodedStreamUrl = CefURIEncode(streamUrl, false);
 
                 // Build helper URL with timeout
