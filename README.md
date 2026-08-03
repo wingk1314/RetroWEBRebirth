@@ -22,7 +22,7 @@ Browservice renders modern web pages (like YouTube) on a Linux server using Chro
 │  Safari/IE ◄── Browservice viewport images              │
 │      │                                                  │
 │      ▼ click red play button                            │
-│  Helper (port 9999) ──► MPlayer OSX Extended            │
+│  Helper (port 9999) ──► PowerVLC                        │
 │                              │                          │
 │                              ▼                          │
 │                     http://SERVER_IP:33000          │
@@ -33,11 +33,11 @@ Browservice renders modern web pages (like YouTube) on a Linux server using Chro
 │                                                         │
 │  Browservice (port 8080) ◄── iMac browser               │
 │      │                                                  │
-│      ▼ VLC helper URL                                   │
+│      ▼ helper URL (/direct)                             │
 │  VSP (port 33000)                                       │
-│      │  yt-dlp → ffmpeg → MPEG-TS                       │
+│      │  yt-dlp → direct CDN URL (Range proxy)           │
 │      ▼                                                  │
-│  MPlayer on iMac streams from VSP                       │
+│  PowerVLC streams directly from YouTube CDN             │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -45,12 +45,17 @@ Browservice renders modern web pages (like YouTube) on a Linux server using Chro
 
 1. User browses YouTube via Browservice on the iMac G4
 2. User clicks the **red play button** in the Browservice control bar
-3. Browservice sends the video URL to the **Helper** (port 9999)
-4. Helper launches **MPlayer OSX Extended** on the iMac
-5. MPlayer connects to the **VSP** (port 33000) on the Linux server
-6. VSP uses **yt-dlp** to extract stream URLs, then **ffmpeg** to transcode to **MPEG-TS** (mpeg2video + mp2, G4-friendly codecs)
-7. VSP serves the TS file with a **fake Content-Length** (estimated from duration × bitrate), enabling MPlayer's seek bar
-8. MPlayer plays the video with seeking support
+3. Browservice sends a `/direct?v=<id>&height=<res>` URL to the **Helper** (port 9999)
+4. Helper launches **PowerVLC** on the iMac (MPlayer OSX Extended as fallback)
+5. PowerVLC connects to the **VSP** (port 33000) on the Linux server
+6. VSP resolves the direct YouTube CDN URL via **yt-dlp** (format 18: 360p H.264+AAC, the only progressive format) and acts as a **Range-forwarding proxy**
+7. YouTube CDN natively supports HTTP Range → PowerVLC gets **true scrubbing on first play** (HTTP 206 at any position, no transcoding, no cache wait)
+8. PowerVLC plays the video with full seek support
+
+### Direct passthrough vs. legacy transcoding
+
+- **Direct passthrough (default)**: no ffmpeg, zero transcode CPU, full-quality 360p progressive, native scrubbing. Requires **PowerVLC** (VLC 3.0.24 port with H.264 AltiVec decode for PowerPC).
+- **Legacy transcoding**: the old `/720p`-style endpoints still exist (`vsp_replacement.py` PROFILES with mpeg2video+mp2) for MPlayer OSX Extended fallback, with fake Content-Length seeking within the transcoded/cached portion.
 
 ## Setup
 
@@ -58,7 +63,7 @@ Browservice renders modern web pages (like YouTube) on a Linux server using Chro
 
 - **Linux server** (Ubuntu 24.04 tested) with Python 3, ffmpeg, yt-dlp
 - **iMac G4** running OS X 10.5 Leopard with Python 2.5
-- **MPlayer OSX Extended** installed on the iMac G4
+- **PowerVLC** installed on the iMac G4 (https://github.com/Olsro/powervlc) — MPlayer OSX Extended works as fallback
 - Both machines on the same local network
 
 ### 1. Build Browservice on Linux
