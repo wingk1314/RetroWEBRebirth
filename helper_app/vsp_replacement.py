@@ -154,6 +154,49 @@ direct_url_cache = {}
 direct_url_lock = threading.Lock()
 DIRECT_URL_TTL = 3600  # 1 hour (YouTube URLs expire ~6h)
 
+# Remux cache: video_id -> (video_url, audio_url, expiry_ts)
+remux_url_cache = {}
+remux_url_lock = threading.Lock()
+
+def get_remux_urls(video_id, height=720):
+    """Resolve DASH video+audio URLs via yt-dlp for remux mode.
+    YouTube only offers progressive (combined) as format 18 = 360p;
+    anything higher is DASH: separate video-only and audio-only streams.
+    Returns (video_url, audio_url) or (None, None)."""
+    with remux_url_lock:
+        cached = remux_url_cache.get(video_id)
+        if cached and time.time() < cached[2]:
+            return cached[0], cached[1]
+    try:
+        result = subprocess.run(
+            [
+                "yt-dlp",
+                "--no-warnings",
+                "-f", "bestvideo[height<=%d][ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/best[height<=%d][ext=mp4][vcodec^=avc1]/best[height<=%d]" % (height, height, height),
+                "--get-url",
+                "--no-playlist",
+                "https://www.youtube.com/watch?v=%s" % video_id,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            urls = [u.strip() for u in result.stdout.strip().splitlines() if u.strip().startswith("http")]
+            if len(urls) >= 2:
+                with remux_url_lock:
+                    remux_url_cache[video_id] = (urls[0], urls[1], time.time() + DIRECT_URL_TTL)
+                log("Remux URLs resolved for %s (video len=%d, audio len=%d)" % (
+                    video_id, len(urls[0]), len(urls[1])))
+                return urls[0], urls[1]
+            elif len(urls) == 1:
+                # Progressive fallback (e.g., format 18 only)
+                return urls[0], None
+        log("yt-dlp remux failed for %s: %s" % (video_id, result.stderr.strip()[:200]))
+    except Exception as e:
+        log("get_remux_urls error: %s" % str(e))
+    return None, None
+
 def get_direct_url(video_id, height=360):
     """Resolve a single progressive (audio+video) URL via yt-dlp.
     Format 18 is the only combined format (360p H.264+AAC)."""
@@ -243,6 +286,118 @@ def serve_direct(handler, video_id, height=360):
             resp.close()
         except:
             pass
+
+
+def serve_remux(handler, video_id, height=720):
+    """Serve 720p/480p via remux: ffmpeg -c copy muxes DASH video+audio
+    into MPEG-TS (no re-encode, near-zero CPU), served with Range support
+    so PowerVLC can scrub. Falls back to direct passthrough (360p) if
+    DASH resolution is unavailable."""
+    vurl, aurl = get_remux_urls(video_id, height)
+    if not vurl:
+        log("Remux URL resolution failed for %s, falling back to direct" % video_id)
+        serve_direct(handler, video_id, min(height, 360))
+        return
+
+    cache_dir = "/tmp/vsp_remux"
+    os.makedirs(cache_dir, exist_ok=True)
+    out_path = os.path.join(cache_dir, "%s_%dp.ts" % (video_id, height))
+
+    # Only restart remux if file isn't already complete
+    if os.path.exists(out_path) and os.path.getsize(out_path) > 100000:
+        log("Remux cache hit: %s" % out_path)
+        serve_file_with_range(handler, out_path)
+        return
+
+    cmd = ["ffmpeg", "-y", "-i", vurl]
+    if aurl:
+        cmd += ["-i", aurl]
+    cmd += [
+        "-c", "copy",
+        # MP4 H.264 uses length-prefixed framing; MPEG-TS requires Annex B.
+        # Without this filter the video stream is unreadable (bin_data).
+        "-bsf:v", "h264_mp4toannexb",
+        "-f", "mpegts",
+        "-max_muxing_queue_size", "1024",
+        out_path,
+    ]
+    log("Starting remux for %s at %dp" % (video_id, height))
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        log("Remux start error: %s" % str(e))
+        handler.send_error(500, "Remux start failed")
+        return
+
+    # Wait for initial buffer
+    for _ in range(20):
+        time.sleep(0.5)
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 65536:
+            break
+        if proc.poll() is not None:
+            break
+
+    if not os.path.exists(out_path) or os.path.getsize(out_path) < 65536:
+        log("Remux produced no data for %s" % video_id)
+        proc.terminate()
+        handler.send_error(500, "Remux failed to produce data")
+        return
+
+    # Monitor remux completion in background
+    def monitor():
+        proc.wait()
+        log("Remux complete for %s (%d bytes)" % (video_id, os.path.getsize(out_path) if os.path.exists(out_path) else 0))
+    threading.Thread(target=monitor, daemon=True).start()
+
+    serve_file_with_range(handler, out_path, proc, video_id)
+
+
+def serve_file_with_range(handler, path, proc=None, video_id=None):
+    """Serve a (possibly still-growing) file with Range support."""
+    try:
+        file_size = os.path.getsize(path)
+        range_header = handler.headers.get("Range")
+        if range_header:
+            range_spec = range_header.replace("bytes=", "")
+            parts = range_spec.split("-")
+            start = int(parts[0]) if parts[0] else 0
+            end = int(parts[1]) if parts[1] else file_size - 1
+            length = end - start + 1
+            handler.send_response(206)
+            handler.send_header("Content-Type", "video/mp2t")
+            handler.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, file_size))
+            handler.send_header("Content-Length", str(length))
+            handler.send_header("Accept-Ranges", "bytes")
+            handler.end_headers()
+            with open(path, "rb") as f:
+                f.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = f.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    handler.wfile.write(chunk)
+                    remaining -= len(chunk)
+        else:
+            handler.send_response(200)
+            handler.send_header("Content-Type", "video/mp2t")
+            handler.send_header("Content-Length", str(file_size))
+            handler.send_header("Accept-Ranges", "bytes")
+            handler.end_headers()
+            with open(path, "rb") as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    handler.wfile.write(chunk)
+    except (BrokenPipeError, ConnectionResetError, OSError):
+        log("Client disconnected serving %s" % (video_id or path))
+        if proc:
+            try:
+                proc.terminate()
+                log("Killed remux for %s" % video_id)
+            except:
+                pass
 
 
 def get_stream_urls(video_id):
@@ -466,7 +621,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(('%s' % {"profile": active_profile, "streams": count, "cached": cached_count}).encode())
             return
 
-        # Direct passthrough: /direct?v=<video_id>&height=360
+        # Direct/remux streaming: /direct?v=<video_id>&height=720
         if path.startswith("/direct"):
             params = {}
             query = path.split("?", 1)[1] if "?" in path else ""
@@ -482,8 +637,13 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                 height = int(params.get("height", "360").rstrip("p"))
             except:
                 height = 360
-            log("Direct passthrough request: video_id=%s height=%dp" % (video_id, height))
-            serve_direct(self, video_id, height)
+            log("Stream request: video_id=%s height=%dp" % (video_id, height))
+            if height > 360:
+                # 480p+ requires DASH muxing (remux, no re-encode)
+                serve_remux(self, video_id, height)
+            else:
+                # <=360p: direct passthrough of progressive format 18
+                serve_direct(self, video_id, height)
             return
 
         # Stream request: /<profile>?v=<video_id>&resolution=720p
