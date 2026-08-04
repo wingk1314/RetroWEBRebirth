@@ -912,7 +912,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
 
             threading.Thread(target=monitor_ffmpeg, daemon=True).start()
 
-            # Stream with fake Content-Length for MPlayer seeking
+            # Stream with estimated Content-Length for player seeking
             fake_size = estimated_size or 16000000  # fallback 16MB
             log("Streaming live: %s (fake CL=%d)" % (video_id, fake_size))
             try:

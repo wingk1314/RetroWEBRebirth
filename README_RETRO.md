@@ -1,43 +1,43 @@
-# RetroREBIRTH — Browservice for iMac G4
+# RetroWEBRebirth — Browservice for iMac G4
 
 A modded version of [Browservice](https://github.com/ttalvitie/browservice) that adds YouTube video streaming to the iMac G4 (OS X 10.5 Leopard, PowerPC G4).
 
-Browservice renders modern web pages (like YouTube) on a Linux server using Chromium, then streams the viewport as images to the old browser on the iMac G4. This mod adds **real video playback** — clicking a YouTube video opens MPlayer on the iMac and plays the video with seeking support.
+Browservice renders modern web pages (like YouTube) on a Linux server using Chromium, then streams the viewport as images to the old browser on the iMac G4. This mod adds **real video playback** — clicking the red play button in the control bar opens **PowerVLC** on the iMac and plays the video with full-timeline scrubbing.
 
 ## What's Included
 
 | Component | Location | What it does |
 |-----------|----------|-------------|
 | **Browservice** | `src/` | Web proxy server (CEF 144, compiled for Linux) |
-| **VSP** | `helper_app/vsp_replacement.py` | Transcodes YouTube videos to MPEG-TS via yt-dlp + ffmpeg |
-| **Helper** | `helper_app/helper.py` | Runs on iMac G4, launches MPlayer when Browservice detects a video |
-| **Resolution Picker** | Built into VSP | Web UI to change streaming quality (720p/480p/360p/240p/144p) |
+| **VSP** | `vsp_replacement.py` | Streaming server (port 33000): direct passthrough + DASH remux |
+| **Helper** | `helper_app/helper.py` | Runs on iMac G4, launches PowerVLC when Browservice detects a video |
+| **Mode/Resolution Picker** | Browservice control bar | Toggles Direct/Legacy mode + resolution (default: L:480p) |
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  iMac G4 (OS X 10.5 Leopard)                           │
+│  iMac G4 (OS X 10.5 Leopard, 192.168.0.100)            │
 │                                                         │
-│  Safari/IE ◄── Browservice viewport images              │
+│  Safari ◄── Browservice viewport images                 │
 │      │                                                  │
 │      ▼ click red play button                            │
-│  Helper (port 9999) ──► MPlayer OSX Extended            │
+│  Helper (port 9999) ──► PowerVLC                        │
 │                              │                          │
 │                              ▼                          │
-│                     http://SERVER_IP:33000          │
-└──────────────────────────────────────┼──────────────────┘
-                                       │
-┌──────────────────────────────────────┼──────────────────┐
-│  Linux Server (SERVER_IP)                           │
+│                  http://192.168.0.130:33000             │
+└──────────────────────────────────┼──────────────────────┘
+                                   │
+┌──────────────────────────────────┼──────────────────────┐
+│  Linux Server (192.168.0.130)                           │
 │                                                         │
 │  Browservice (port 8080) ◄── iMac browser               │
 │      │                                                  │
-│      ▼ VLC helper URL                                   │
+│      ▼ stream URL (/direct or /profile)                 │
 │  VSP (port 33000)                                       │
-│      │  yt-dlp → ffmpeg → MPEG-TS                       │
-│      ▼                                                  │
-│  MPlayer on iMac streams from VSP                       │
+│      │  yt-dlp → YouTube CDN (Range proxy)              │
+│      ▼  or ffmpeg remux (DASH → MPEG-TS, -c copy)       │
+│  PowerVLC streams with full scrubbing                   │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -45,26 +45,39 @@ Browservice renders modern web pages (like YouTube) on a Linux server using Chro
 
 1. User browses YouTube via Browservice on the iMac G4
 2. Clicks the **red play button** in the Browservice control bar
-3. Browservice sends the video URL to the **Helper** (port 9999)
-4. Helper launches **MPlayer OSX Extended** on the iMac
-5. MPlayer connects to the **VSP** (port 33000) on the Linux server
-6. VSP uses **yt-dlp** to extract stream URLs, then **ffmpeg** to transcode to **MPEG-TS** (mpeg2video + mp2, G4-friendly codecs)
-7. VSP serves the TS file with a **fake Content-Length** (estimated from duration × bitrate), enabling MPlayer's seek bar
-8. MPlayer plays the video with seeking support
+3. Browservice builds a stream URL and sends it to the **Helper** (port 9999)
+4. Helper launches **PowerVLC** on the iMac (binary + `--play-and-exit`)
+5. PowerVLC connects to the **VSP** (port 33000) on the Linux server
+6. VSP routes based on the URL:
+   - `/direct?v=<id>&height=<res>` — **Direct mode** (144p/240p/360p): yt-dlp resolves YouTube's progressive format 18 (360p H.264+AAC), VSP Range-forwards the CDN stream — **no server CPU**
+   - `/<profile>?v=<id>&resolution=<res>` — **Legacy mode** (480p/720p): yt-dlp fetches DASH H.264+AAC streams, ffmpeg `-c copy` muxes them to MPEG-TS (mux, not re-encode)
+7. VSP serves with **estimated Content-Length** (from `yt-dlp -J` format sizes), enabling the full timeline
+8. PowerVLC plays the video with **true scrubbing on first play** (HTTP 206 Range at any position)
+
+## Streaming Modes
+
+| Mode | Display | Route | Resolutions | Server CPU |
+|------|---------|-------|-------------|------------|
+| **Direct** | `D:144p`…`D:360p` | `/direct` | 144p / 240p / 360p | ~0% (CDN Range passthrough) |
+| **Legacy** | `L:480p` / `L:720p` | `/<profile>` | 480p / 720p | ~1% (DASH remux, `-c copy`) |
+
+- **Default: L:480p**
+- The resolution button in the control bar cycles: `L:480p → L:720p → D:144p → D:240p → D:360p → L:480p (wrap)`
+- Direct mode ≤360p streams YouTube's progressive format 18 with zero transcoding.
+- Legacy mode 480p/720p uses ffmpeg `-c copy` (no re-encode): `bestvideo[height<=N][ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]` → `-bsf:v h264_mp4toannexb -f mpegts`.
 
 ## Setup
 
 ### Prerequisites
 
 - **Linux server** (Ubuntu 24.04 tested) with Python 3, ffmpeg, yt-dlp
-- **iMac G4** running OS X 10.5 Leopard with Python 2.5
-- **MPlayer OSX Extended** installed on the iMac G4
+- **iMac G4** running OS X 10.5 Leopard with Python 2.5 and **PowerVLC** (VLC 3.0.24 port with H.264 AltiVec decode)
 - Both machines on the same local network
 
 ### 1. Build Browservice on Linux
 
 ```bash
-# On the Linux server (SERVER_IP)
+# On the Linux server
 cd ~/browservice
 make
 ```
@@ -74,35 +87,38 @@ See `BUILD.md` for detailed build instructions.
 ### 2. Deploy the VSP
 
 ```bash
-# Copy VSP to Linux server
-scp helper_app/vsp_replacement.py user@SERVER_IP:~/browservice/vsp_replacement.py
+# Start VSP (port 33000)
+nohup python3 ~/browservice/vsp_replacement.py --port 33000 > /tmp/vsp.log 2>&1 &
 
-# Start VSP
-ssh user@SERVER_IP 'nohup python3 ~/browservice/vsp_replacement.py --port 33000 --profile 720p > /tmp/vsp.log 2>&1 &'
+# Verify
+curl http://127.0.0.1:33000/status   # → {'profile': '480p', 'streams': 0, 'cached': 0}
 ```
 
 ### 3. Deploy the Helper on iMac G4
 
 ```bash
-# Copy helper to iMac
-scp helper_app/helper.py user@IMAC_IP:~/helper.py
+# Copy helper to iMac (scp fails against old iMac SSH — pipe via ssh)
+cat helper_app/helper.py | ssh imac-g4 'cat > /path/helper.py'
 
 # Start helper
-ssh user@IMAC_IP 'nohup python ~/helper.py --port 9999 > /tmp/helper.log 2>&1 &'
+ssh imac-g4 'nohup python /path/helper.py --port 9999 > /tmp/helper.log 2>&1 &'
 ```
+
+The helper must be Python 2.5 compatible (ASCII-only source, print statements).
 
 ### 4. Start Browservice
 
 ```bash
-# On the Linux server
+# On the Linux server (or use start_browservice.sh)
 cd ~/browservice
-nohup ./release/bin/browservice \
+./release/bin/browservice \
   --vlc-enabled=YES \
   --vlc-client-ip=IMAC_IP \
   --vlc-helper-port=9999 \
   --vsp-server=http://SERVER_IP:33000 \
   --vsp-profile=default \
   --vlc-timeout=300 \
+  --data-dir=/home/rk/browservice/data \
   --start-page=https://www.google.com \
   --vice-opt-http-listen-addr=0.0.0.0:8080 \
   > /tmp/browservice.log 2>&1 &
@@ -112,53 +128,56 @@ nohup ./release/bin/browservice \
 
 Open `http://SERVER_IP:8080` in the iMac's browser.
 
-- **Resolution picker** loads first — select your quality (default: 720p)
-- Navigate to YouTube, find a video, click the **red play button** in the control bar
-- MPlayer opens and plays the video
+- Navigate to YouTube, find a video
+- Click the **red play button** in the control bar
+- PowerVLC opens and plays the video with full-timeline scrubbing
+- The **resolution button** (showing `L:480p` by default) cycles mode + resolution
 
-## Streaming Profiles
+## VSP Endpoints
 
-| Profile | Resolution | Video Bitrate | Audio |
-|---------|-----------|---------------|-------|
-| 720p | 1280×720 | 2500k | 128k mp2 |
-| 480p | 640×480 | 1000k | 128k mp2 |
-| 360p | 480×360 | 500k | 96k mp2 |
-| 240p | 320×240 | 200k | 64k mp2 |
-| 144p | 256×144 | 100k | 32k mp2 |
-
-All profiles output **MPEG-TS** with **mpeg2video** (video) and **mp2** (audio) — codecs the G4 can decode natively.
+| Endpoint | Purpose |
+|----------|---------|
+| `/` or `/resolution` | Resolution picker page (legacy UI) |
+| `/set/<profile>` | Set active profile |
+| `/status` | JSON status: profile, active streams, cached count |
+| `/direct?v=<id>&height=<res>` | Direct passthrough (≤360p) / DASH remux (>360p) |
+| `/<profile>?v=<id>&resolution=<res>` | Legacy ffmpeg transcode (MPlayer fallback) |
 
 ## Key Technical Decisions
 
-### Why MPEG-TS instead of MP4?
+### Why Direct passthrough for ≤360p?
 
-MP4 requires a moov atom that's only written when ffmpeg finishes encoding. No player can seek in a growing MP4. MPEG-TS writes program stream maps periodically, so players can parse the stream format immediately.
+YouTube's **format 18 is the only progressive format** (360p H.264+AAC, audio+video in one URL). Its CDN natively supports HTTP Range (206, Accept-Ranges, full Content-Length), so PowerVLC gets **true scrubbing on first play with zero transcoding** — no ffmpeg, no server CPU.
 
-### Why fake Content-Length?
+### Why remux (not transcode) for 480p/720p?
 
-MPlayer needs a `Content-Length` header to enable its seek bar. Since the file is growing during transcoding, we predict the final size from `duration × bitrate` and report that as Content-Length. MPlayer thinks the file is complete and shows a seek bar. Seeking works by requesting byte ranges within the already-written portion of the file.
+Everything above 360p on YouTube is split DASH (separate video + audio streams) that needs muxing. ffmpeg `-c copy` combines them **without re-encoding** (~1% CPU vs 36%+ for real transcoding).
 
-### Why mpeg2video + mp2?
+### Why estimated Content-Length?
 
-The iMac G4 has no hardware H.264 decoder. MPEG-2 Video and MP2 audio are the most efficient codecs the G4 can decode in software at 720p.
+The player derives duration from Content-Length. For remux streams the file grows while playing, so VSP advertises the **estimated final size** (from `yt-dlp -J` format filesizes + ~5% TS overhead) — VLC shows the full timeline and Range requests at any position are honored as the remux catches up.
+
+### Why PowerVLC instead of MPlayer?
+
+PowerVLC is a VLC 3.0.24 port with H.264 AltiVec decode for PowerPC — it plays the modern H.264 streams directly. MPlayer OSX Extended remains as a fallback in the helper (legacy transcode mode uses MPEG-2).
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
-| MPlayer doesn't open | Check helper is running: `ssh user@IMAC_IP 'cat /tmp/helper.log'` |
-| Video plays but no seek bar | VSP may not have finished transcoding — wait 10-30s |
-| Forward seek ends video | The video is short — try a longer video |
-| "Connection refused" from MPlayer | VSP may have stopped — restart it |
-| Black screen in MPlayer | Kill MPlayer and try again — display connection may have failed |
+| PowerVLC opens but plays nothing | Helper must launch the binary directly with VLC args (`--play-and-exit --no-video-title-show`); `open -a` doesn't forward URLs on 10.5 |
+| Timeline shows only a few seconds | VSP sent current file size as Content-Length — must use estimated final size (check `/tmp/vsp.log` for `Remux URLs resolved`) |
+| Stream dies during first play | Remux restart-loop: check for multiple `Starting remux for <id>` lines; the in-progress registry prevents this |
+| Video shows as unreadable (bin_data) | Remux missing `-bsf:v h264_mp4toannexb` or picked AV1 (needs `[vcodec^=avc1]`) |
+| "Connection refused" from player | VSP may have stopped — restart it |
+| No red play button | `--vlc-enabled=YES` and `--vlc-client-ip` must be set; rebuild after any `src/window.cpp` change |
 
 ## Credits
 
 - [Browservice](https://github.com/ttalvitie/browservice) by Topi Talvitie — MIT License
-- [VintageStreamProxy](https://github.com/nickoala/vintage-stream-proxy) — original VSP concept
+- [PowerVLC](https://github.com/Olsro/powervlc) — VLC 3.0.24 port for PowerPC (H.264 AltiVec decode)
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) — YouTube stream extraction
-- [ffmpeg](https://ffmpeg.org/) — video transcoding
-- [MPlayer OSX Extended](https://mplayerosxext.sourceforge.net/) — media player for OS X
+- [ffmpeg](https://ffmpeg.org/) — DASH remuxing
 
 ## License
 

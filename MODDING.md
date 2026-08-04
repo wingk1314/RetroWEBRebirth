@@ -35,21 +35,40 @@ bool isYouTubeVideoURL(string url) {
 optional<string> extractYouTubeVideoID(string url);
 ```
 
-**Resolution selector** (module-level state):
+**Mode + resolution selector** (module-level state):
 
 ```cpp
-// Transcoding resolution options for VSP
-const vector<string> transcodeResolutions = {"144p", "240p", "360p", "480p", "720p"};
-int currentTranscodeResolutionIdx = 3; // Default: 480p
+// Direct mode: passthrough only (144p/240p/360p via format 18, no server work)
+const vector<string> directResolutions = {"144p", "240p", "360p"};
+// Legacy mode: remux via /profile (480p/720p, ffmpeg DASH muxing)
+const vector<string> legacyResolutions = {"480p", "720p"};
+
+enum StreamMode { StreamDirect, StreamLegacy };
+StreamMode currentStreamMode = StreamLegacy;  // Default: L:480p
+int currentResIdx = 0; // Index within the current mode's resolution list
 
 string getCurrentTranscodeResolution() {
-    return transcodeResolutions[currentTranscodeResolutionIdx];
+    const auto& res = (currentStreamMode == StreamDirect) ? directResolutions : legacyResolutions;
+    return res[currentResIdx];
 }
 
+// Display text: "D:360p" (direct) or "L:480p" (legacy)
+string getResolutionDisplayText() {
+    string prefix = (currentStreamMode == StreamDirect) ? "D:" : "L:";
+    return prefix + getCurrentTranscodeResolution();
+}
+
+// Cycle: D:144p -> D:240p -> D:360p -> L:480p -> L:720p -> D:144p (wrap)
 void cycleTranscodeResolution() {
-    currentTranscodeResolutionIdx =
-        (currentTranscodeResolutionIdx + 1) % transcodeResolutions.size();
-    INFO_LOG("Transcode resolution changed to ", getCurrentTranscodeResolution());
+    const auto& res = (currentStreamMode == StreamDirect) ? directResolutions : legacyResolutions;
+    currentResIdx++;
+    if(currentResIdx >= (int)res.size()) {
+        currentResIdx = 0;
+        currentStreamMode = (currentStreamMode == StreamDirect) ? StreamLegacy : StreamDirect;
+        INFO_LOG("Stream mode changed to ",
+                 (currentStreamMode == StreamDirect ? "Direct" : "Legacy"));
+    }
+    INFO_LOG("Resolution changed to ", getResolutionDisplayText());
 }
 ```
 
@@ -194,7 +213,7 @@ PowerVLC ──HTTP Range──> VSP (Linux, :33000) ──HTTP 206──> YouTu
 ## Gotchas (all hit in production)
 
 1. **TWO URL-building sites in `src/window.cpp`** — red play button (~line 656) AND manual VLC launch (~line 1429). Both must emit `/direct`.
-2. **Default resolution lives in TWO places**: `window.cpp` `currentTranscodeResolutionIdx` AND `vsp_replacement.py` `DEFAULT_PROFILE`. Change both together (current default: 480p).
+2. **Default mode+resolution**: `window.cpp` initializes `currentStreamMode = StreamLegacy` + `currentResIdx = 0` (→ L:480p); `vsp_replacement.py` `DEFAULT_PROFILE = "480p"` is the fallback for legacy routes. The control-bar button cycles the full set: L:480p → L:720p → D:144p → D:240p → D:360p.
 3. **`open -a PowerVLC <url>` opens but never plays** on OS X 10.5 — launch the binary directly with VLC args.
 4. **Helper is Python 2.5**: ASCII-only source, print statements, `except Exception, e:`.
 5. **`pkill -f vsp_replacement.py` often does NOT kill it** (setsid'd from ssh) — kill by explicit PID.
