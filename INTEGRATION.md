@@ -1,132 +1,98 @@
-# Browservice + VintageStreamProxy Integration
+# Browservice + PowerVLC Integration
 
-Watch YouTube videos on your iMac G4 by combining Browservice (for browsing) with VintageStreamProxy (for video playback).
+Watch YouTube videos on your iMac G4 by combining Browservice (for browsing) with PowerVLC (for video playback) and VSP (Vintage Stream Proxy replacement) on the Linux box.
 
-## How It Works
+## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  iMac G4 (OS X Tiger)                                       │
-│                                                             │
-│  ┌─────────────────┐    ┌─────────────────┐                │
-│  │   Safari/IE     │    │      VLC        │                │
-│  │   (Browservice) │    │   (Vintage      │                │
-│  │                 │    │    StreamProxy)  │                │
-│  └────────┬────────┘    └────────▲────────┘                │
-│           │                      │                          │
-│           │   1. Browse YouTube  │                          │
-│           │   2. Copy URL        │                          │
-│           │   3. Paste in form   │                          │
-│           │   4. Click Play ─────┘                          │
-│           │                                                 │
-└───────────┼─────────────────────────────────────────────────┘
-            │
-            ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Server (Linux/Mac VM)                                      │
-│                                                             │
-│  ┌─────────────────┐    ┌─────────────────┐                │
-│  │   Browservice   │    │ VintageStream   │                │
-│  │   (Chromium)    │    │    Proxy        │                │
-│  └─────────────────┘    └─────────────────┘                │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
+iMac G4 (192.168.0.100, Mac OS X Leopard 10.5.9, user rk)
+  Safari → Browservice viewport images (http://192.168.0.130:8080)
+  red play button → helper (port 9999 on iMac) → PowerVLC
+  PowerVLC → VSP (port 33000 on Linux box) → YouTube CDN (direct, no transcode)
 ```
+
+Components:
+
+- **Browservice** (Linux box, `~/browservice`): CEF-based proxy that renders the web into viewport images; runs as systemd service `browservice.service` with AMD hardware acceleration.
+- **Helper** (iMac G4): `/Applications/BrowserviceHelper.app/Contents/Resources/helper.py` — Python 2.5 script, listens on port 9999, receives `/vlc?streamUrl=...` from Browservice and launches PowerVLC.
+- **VSP** (Linux box, `~/browservice/vsp_replacement.py`): streaming server on port 33000. Handles `/direct` (PowerVLC) and legacy profile routes.
+
+## Streaming Modes
+
+### Direct passthrough (PowerVLC — the default)
+
+Route: `/direct?v=<id>&height=<res>`
+
+- **`height > 360` → remux mode**: yt-dlp fetches DASH streams (H.264 video + AAC audio), `ffmpeg -c copy` muxes them to MPEG-TS. This is a **mux, not a transcode** (~1% CPU vs 36%+ for real transcoding).
+- **`height <= 360` → passthrough**: Range-forwarding of YouTube's progressive format 18 (360p, audio+video in one URL). No transcoding at all.
+- **True scrubbing on first play**: YouTube CDN supports HTTP Range; VSP resolves URLs with `yt-dlp -J` and advertises the **estimated final size** as Content-Length, so PowerVLC shows the full timeline immediately. No waiting for the stream to finish.
+
+### Legacy transcode (MPlayer fallback)
+
+Route: `/<profile>?v=<id>&resolution=<res>`
+
+- ffmpeg transcodes to MPEG-TS with the profile's codec settings. Used for non-YouTube URLs and as a fallback path; much heavier on CPU.
 
 ## Setup
 
-### 1. Install VintageStreamProxy on your server
+### 1. Linux box (server)
 
 ```bash
-# On your Linux/Mac VM
-git clone https://github.com/SoftwareGuy/VintageStreamProxy.git
-cd VintageStreamProxy
-dotnet run -c Release
+# Build browservice (see BUILD.md), then:
+cd ~/browservice
+
+# VSP server (port 33000)
+setsid nohup python3 vsp_replacement.py --port 33000 > /tmp/vsp.log 2>&1 < /dev/null &
+
+# Browservice with all streaming options (see start_browservice.sh)
+bash start_browservice.sh
 ```
 
-### 2. Install Browservice on your server
+The launcher enables the integration with:
 
 ```bash
-# On your Linux/Mac VM
-git clone https://github.com/ttalvitie/browservice.git
-cd browservice
-# Follow BUILD.md for your platform
+--vlc-enabled=YES \
+--vlc-client-ip=192.168.0.100 \
+--vlc-helper-port=9999 \
+--vsp-server=http://192.168.0.130:33000 \
+--vsp-profile=default \
+--vlc-timeout=300 \
+--data-dir=/home/rk/browservice/data   # persists cookies/history/cache across restarts
 ```
 
-### 3. Set up the iMac G4
+### 2. iMac G4 (client)
 
-1. Copy `vlc-youtube.sh` to the iMac G4
-2. Copy `vlc-launcher.html` to the iMac G4
-3. Install VLC on the iMac G4
-
-### 4. Configure
-
-Edit `vlc-youtube.sh` and set the VintageStreamProxy server address:
-
-```bash
-VSP_SERVER="http://SERVER_IP:33000"
-```
+1. Install PowerVLC.
+2. Install the helper app (`BrowserviceHelper.app`) — `helper.py` listens on port 9999.
 
 ## Usage
 
-### Method 1: Using the HTML Form
+1. Open `http://192.168.0.130:8080` in Safari on the iMac G4.
+2. Browse to a YouTube video.
+3. Click the **red play button** in the control bar (or press `Ctrl+Shift+V` for the manual launch path).
+4. An "Opening in VLC..." popup appears; PowerVLC launches with the stream URL and plays it with a fully scrubbable timeline.
 
-1. Open Browservice on the iMac G4
-2. Browse YouTube and find a video
-3. Copy the YouTube URL
-4. Open `vlc-launcher.html` in Browservice (as a local file or from the server)
-5. Paste the YouTube URL
-6. Click "Open in VLC"
-7. Copy the stream URL and open it in VLC
+## Resolution Selection
 
-### Method 2: Using the Shell Script
+Default: **480p**. The control bar includes a resolution selector cycling through `144p / 240p / 360p / 480p / 720p`. Higher resolutions use the remux path; 360p and below use direct passthrough of the progressive stream.
 
-```bash
-# On the iMac G4
-./vlc-youtube.sh "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-./vlc-youtube.sh "dQw4w9WgXcQ"
-./vlc-youtube.sh "dQw4w9WgXcQ" mpeg1
-```
+## Configuration Options (Browservice)
 
-### Method 3: Using the Clipboard
-
-1. Browse YouTube in Browservice
-2. Select and copy the video ID from the URL bar
-3. Open Terminal on the iMac G4
-4. Run: `./vlc-youtube.sh <paste-video-id>`
-
-## Available Profiles
-
-| Profile | Container | Video | Audio | Resolution |
-|---------|-----------|-------|-------|------------|
-| `default` | ASF | WMV2 | WMA2 | 320x240 |
-| `win98` | ASF | MSMPEG4v2 | MP3 | 320x240 |
-| `mpeg1` | MPEG | MPEG1 | MPEG2 | 320x240 |
-| `xvid` | ASF | MSMPEG4v2 | MP3 | varies |
-| `potato` | MP2 | MPEG1 | MPEG2 | 240x180 |
-| `spud` | MP2 | MPEG1 | MPEG2 | 160x120 |
-
-## Tips
-
-- **Performance**: Use `potato` or `spud` profiles on slower hardware
-- **Quality**: Use `default` or `win98` on faster hardware (500MHz+)
-- **Audio**: If audio is choppy, try reducing the video quality
-- **Network**: Use Ethernet, not WiFi (100Mbps recommended)
+| Option | Default | Purpose |
+|--------|---------|---------|
+| `--vlc-enabled` | NO | Enable YouTube → VLC detection |
+| `--vlc-client-ip` | (empty) | IP of the iMac helper (required for detection) |
+| `--vlc-helper-port` | 9999 | Port of the iMac helper |
+| `--vsp-server` | (empty) | VSP base URL, e.g. `http://192.168.0.130:33000` |
+| `--vsp-profile` | default | Legacy transcode profile name |
+| `--vlc-timeout` | 300 | Seconds before the helper gives up on the stream |
+| `--data-dir` | (empty) | Persistent CEF data dir; empty = incognito (no cookies/history) |
 
 ## Troubleshooting
 
-- **VLC won't open**: Make sure VLC is installed and can open URLs
-- **No video**: Check that VintageStreamProxy is running and accessible
-- **Choppy playback**: Try a lower quality profile or check network speed
-- **No audio**: Some profiles have limited audio quality
+- **PowerVLC opens but never plays**: make sure the helper launches the binary directly (`/Applications/PowerVLC.app/Contents/MacOS/PowerVLC --play-and-exit --no-video-title-show <url>`). `open -a PowerVLC <url>` does NOT forward the URL on OS X 10.5.
+- **Timeline shows only a few seconds / no scrubbing**: the VSP is serving the current partial file size as Content-Length instead of the estimated final size. Check `/tmp/vsp.log` and the remux mode docs.
+- **Stream keeps dying during first play**: the remux is being restarted on every Range probe. The in-progress remux registry (`remux_procs`) prevents this — make sure it's in place; restarting VSP kills the active stream.
+- **No red play button**: `--vlc-enabled=YES` and `--vlc-client-ip` must be set, and the binary rebuilt/restarted after any `src/window.cpp` change.
 
-## Future Improvements
-
-Potential enhancements to make this more seamless:
-
-1. **Browser bookmarklet** - One-click URL capture from Browservice
-2. **Custom Browservice button** - Add a "Play in VLC" button to the control bar
-3. **Automatic detection** - JavaScript injection to detect YouTube URLs
-4. **VLC web interface** - Control VLC remotely from Browservice
-
-See `MODDING.md` for details on modifying Browservice's C++ code.
+See `MODDING.md` for the C++ implementation details.

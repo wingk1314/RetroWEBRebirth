@@ -38,3 +38,7 @@ debug
 release
 gen
 GPUCache
+data/
+__pycache__/
+*.bak
+start_browservice.sh

@@ -1,336 +1,221 @@
-# Modding Browservice for VintageStreamProxy Integration
+# Modding Browservice for PowerVLC + VSP Integration
 
-This document describes how to modify Browservice's C++ code to automatically detect YouTube video URLs and trigger VLC playback via VintageStreamProxy.
+This document describes how Browservice's C++ code was modified to automatically detect YouTube video URLs and trigger PowerVLC playback through the VSP (Vintage Stream Proxy replacement) server.
 
 ## Architecture Overview
 
 ### Current Flow
 
 ```
-User clicks link → CEF OnBeforeBrowse() → Navigation proceeds → Page renders
+User clicks YouTube link → CEF OnBeforeBrowse() → detect video ID
+  → build /direct stream URL → open "Opening in VLC..." popup
+  → helper on iMac (port 9999) → PowerVLC launches with stream URL
+  → PowerVLC → VSP (port 33000) → YouTube CDN (direct, no transcode)
 ```
 
-### Desired Flow
+### Key Design Points
 
-```
-User clicks YouTube link → CEF OnBeforeBrowse() → Detect video ID → 
-  → Send command to client → Client opens VLC → Block navigation
-```
+- **PowerVLC is the player**, launched directly by the iMac helper with `--play-and-exit --no-video-title-show <url>` (the `open -a` mechanism does not forward URLs on OS X 10.5).
+- **VSP resolves and streams the video** in `/direct` mode: passthrough for ≤360p (YouTube progressive format 18), remux of DASH H.264+AAC streams for 480p/720p. No re-encoding.
+- **Full timeline scrubbing** comes from serving the *estimated final* Content-Length (from `yt-dlp -J` format filesizes), not the current growing-file size.
 
 ## Key Files to Modify
 
-### 1. `src/window.cpp` — Navigation Interception
+### 1. `src/window.cpp` — YouTube Detection & Stream URL Building
 
-The `OnBeforeBrowse` function (line 431) is called before every navigation. Currently it only blocks local file requests:
+**YouTube URL detection** (`isYouTubeVideoURL` + `extractYouTubeVideoID`):
 
 ```cpp
-virtual bool OnBeforeBrowse(
-    CefRefPtr<CefBrowser> browser,
-    CefRefPtr<CefFrame> frame,
-    CefRefPtr<CefRequest> request,
-    bool userGesture,
-    bool isRedirect
-) override {
-    REQUIRE_UI_THREAD();
-    REQUIRE(window_->state_ == Open);
-    REQUIRE(browser);
-    REQUIRE(window_->browser_);
-    REQUIRE(window_->browser_->IsSame(browser));
+// Detect YouTube video URLs. Works with www./m. prefixes and case-insensitively.
+bool isYouTubeVideoURL(string url) {
+    string lower = toLowerASCII(url);
+    // matches youtube.com/watch, youtu.be/, m.youtube.com, etc.
+}
 
-    // Current: Block local files
-    REQUIRE(request);
-    return globals->config->blockFileScheme && isLocalFileRequestURL(request->GetURL());
+optional<string> extractYouTubeVideoID(string url);
+```
+
+**Resolution selector** (module-level state):
+
+```cpp
+// Transcoding resolution options for VSP
+const vector<string> transcodeResolutions = {"144p", "240p", "360p", "480p", "720p"};
+int currentTranscodeResolutionIdx = 3; // Default: 480p
+
+string getCurrentTranscodeResolution() {
+    return transcodeResolutions[currentTranscodeResolutionIdx];
+}
+
+void cycleTranscodeResolution() {
+    currentTranscodeResolutionIdx =
+        (currentTranscodeResolutionIdx + 1) % transcodeResolutions.size();
+    INFO_LOG("Transcode resolution changed to ", getCurrentTranscodeResolution());
 }
 ```
 
-**Modification needed:**
+**⚠ There are TWO URL-building sites in `window.cpp`** — the red-play-button path (~line 656) AND the manual VLC launch path (~line 1429). Patching only one means videos still hit the legacy transcode path (symptoms: VSP log shows ffmpeg/mpeg2video; PowerVLC crashes on the transcoded stream). Grep for `streamUrl = vspServer` — both must emit `/direct?v=...&height=...` for YouTube IDs.
+
+**Red play button path** (in the navigation/video-detection handler):
 
 ```cpp
-virtual bool OnBeforeBrowse(
-    CefRefPtr<CefBrowser> browser,
-    CefRefPtr<CefFrame> frame,
-    CefRefPtr<CefRequest> request,
-    bool userGesture,
-    bool isRedirect
-) override {
-    REQUIRE_UI_THREAD();
-    REQUIRE(window_->state_ == Open);
-    REQUIRE(browser);
-    REQUIRE(window_->browser_);
-    REQUIRE(window_->browser_->IsSame(browser));
-
-    REQUIRE(request);
-    string url = string(request->GetURL());
-    
-    // NEW: Check for YouTube video URLs
-    if (isYouTubeVideoURL(url)) {
-        string videoId = extractYouTubeVideoId(url);
-        if (!videoId.empty()) {
-            // Send command to client to open VLC
-            window_->sendVLCCommand(videoId);
-            
-            // Show notification in browser
-            window_->showNotification("Opening in VLC: " + videoId);
-            
-            // Block the navigation
-            return true;
+if(globals->config->vlcEnabled && isYouTubeVideoURL(url)) {
+    optional<string> videoID = extractYouTubeVideoID(url);
+    if(videoID.has_value()) {
+        if(globals->config->vlcClientIP.empty()) {
+            WARNING_LOG("VLC enabled but --vlc-client-ip not set, ignoring YouTube URL: ", url);
+            return false;
         }
+
+        // Build VSP stream URL (direct passthrough mode for PowerVLC)
+        string vspServer = globals->config->vspServer;
+        if(!vspServer.empty() && vspServer.back() == '/') {
+            vspServer.pop_back();
+        }
+        string resolution = getCurrentTranscodeResolution();
+        string streamUrl = vspServer + "/direct"
+                         + "?v=" + videoID.value()
+                         + "&height=" + resolution;
+        string encodedStreamUrl = CefURIEncode(streamUrl, false);
+
+        // Build helper URL with timeout
+        string helperUrl = "http://" + globals->config->vlcClientIP + ":"
+                         + std::to_string(globals->config->vlcHelperPort)
+                         + "/vlc?streamUrl=" + encodedStreamUrl
+                         + "&timeout=" + std::to_string(globals->config->vlcTimeout);
+        // ... create "Opening in VLC..." popup window, send the request
     }
-    
-    // Existing: Block local files
-    return globals->config->blockFileScheme && isLocalFileRequestURL(url);
 }
 ```
 
-### 2. `src/window.hpp` — New Methods
-
-Add methods to handle YouTube detection and VLC commands:
+**Manual VLC launch path** (Ctrl+Shift+V / control-bar button):
 
 ```cpp
-class Window {
-    // ... existing code ...
-    
-    // NEW: YouTube/VLC integration
-    bool isYouTubeVideoURL(const string& url);
-    string extractYouTubeVideoId(const string& url);
-    void sendVLCCommand(const string& videoId);
-    void showNotification(const string& message);
-    
-    // NEW: VintageStreamProxy configuration
-    string vspServer_;
-    string vspProfile_;
-};
+string vspServer = globals->config->vspServer;
+if(vspServer.empty()) {
+    WARNING_LOG("VSP server not configured (--vsp-server)");
+    return;
+}
+if(vspServer.back() == '/') {
+    vspServer.pop_back();
+}
+
+string streamUrl;
+string resolution = getCurrentTranscodeResolution();
+optional<string> videoID = extractYouTubeVideoID(url);
+if(videoID.has_value()) {
+    streamUrl = vspServer + "/direct"
+              + "?v=" + videoID.value()
+              + "&height=" + resolution;
+    INFO_LOG("Manual VLC: YouTube video ", videoID.value(), " at ", resolution);
+} else {
+    // Pass the full URL to VSP for non-YouTube sites (legacy transcode)
+    streamUrl = vspServer + "/" + globals->config->vspProfile
+              + "?url=" + string(CefURIEncode(url, false).ToString())
+              + "&resolution=" + resolution;
+    INFO_LOG("Manual VLC: generic URL ", url, " at ", resolution);
+}
+
+string encodedStreamUrl = CefURIEncode(streamUrl, false);
+
+// Build helper URL
+string helperUrl = "http://" + globals->config->vlcClientIP + ":"
+                 + std::to_string(globals->config->vlcHelperPort)
+                 + "/vlc?streamUrl=" + encodedStreamUrl
+                 + "&timeout=" + std::to_string(globals->config->vlcTimeout);
 ```
 
-### 3. `src/window.cpp` — Implementation
+**⚠ KEY FIX (B1)**: The "Opening in VLC..." notification must be a *new popup window* created with `createSignedDataURL(...)` passed directly to `tryCreate` as the initial URI. `navigateToURI` fails because `browser_` is null until `OnAfterCreated` fires (async).
+
+### 2. `src/config_defs.hpp` — New Configuration Options
+
+Added to `CONF_FOREACH_OPT`:
 
 ```cpp
-bool Window::isYouTubeVideoURL(const string& url) {
-    // Check for YouTube video URL patterns
-    return (url.find("youtube.com/watch") != string::npos ||
-            url.find("youtu.be/") != string::npos ||
-            url.find("youtube.com/embed/") != string::npos);
-}
-
-string Window::extractYouTubeVideoId(const string& url) {
-    // Extract video ID from various URL formats
-    size_t pos;
-    
-    // youtube.com/watch?v=VIDEO_ID
-    pos = url.find("v=");
-    if (pos != string::npos) {
-        string id = url.substr(pos + 2, 11);
-        if (id.length() == 11) return id;
-    }
-    
-    // youtu.be/VIDEO_ID
-    pos = url.find("youtu.be/");
-    if (pos != string::npos) {
-        string id = url.substr(pos + 9, 11);
-        if (id.length() == 11) return id;
-    }
-    
-    // youtube.com/embed/VIDEO_ID
-    pos = url.find("youtube.com/embed/");
-    if (pos != string::npos) {
-        string id = url.substr(pos + 18, 11);
-        if (id.length() == 11) return id;
-    }
-    
-    return "";
-}
-
-void Window::sendVLCCommand(const string& videoId) {
-    // Option 1: Send via WebSocket to client
-    // Option 2: Trigger HTTP request to local VLC
-    // Option 3: Use OS command to open VLC
-    
-    string streamUrl = vspServer_ + "/" + vspProfile_ + "?v=" + videoId;
-    
-    // For now, log the command (actual implementation depends on client capabilities)
-    INFO_LOG("VLC command: vlc \"", streamUrl, "\"");
-    
-    // TODO: Implement actual VLC launching
-    // This could be:
-    // 1. A WebSocket message to the client
-    // 2. An HTTP request to a local helper service
-    // 3. An OS-level command (system("vlc ..."))
-}
-
-void Window::showNotification(const string& message) {
-    // Inject JavaScript to show notification in the browser
-    if (browser_ && browser_->GetMainFrame()) {
-        string js = "document.title = '📺 " + message + "';";
-        browser_->GetMainFrame()->ExecuteJavaScript(js, "about:blank", 0);
-    }
-}
+CONF_FOREACH_OPT_ITEM(vlcEnabled)     // --vlc-enabled=YES/NO
+CONF_FOREACH_OPT_ITEM(vlcClientIP)    // --vlc-client-ip=192.168.0.100
+CONF_FOREACH_OPT_ITEM(vlcHelperPort)  // --vlc-helper-port=9999
+CONF_FOREACH_OPT_ITEM(vspServer)      // --vsp-server=http://192.168.0.130:33000
+CONF_FOREACH_OPT_ITEM(vspProfile)     // --vsp-profile=default
+CONF_FOREACH_OPT_ITEM(vlcTimeout)     // --vlc-timeout=300
 ```
 
-### 4. `src/config.cpp` — Add Configuration Options
+### 3. iMac Helper (`BrowserviceHelper.app/.../helper.py`)
 
-```cpp
-// Add to config parsing
-if (key == "vsp-server") {
-    globals->config->vspServer = value;
-} else if (key == "vsp-profile") {
-    globals->config->vspProfile = value;
-}
+Python 2.5 script on port 9999. Receives `/vlc?streamUrl=...&timeout=...` and launches PowerVLC:
+
+```python
+# NOTE: Python 2.5 — ASCII-only source (no em-dashes in comments),
+# print statements, `except Exception, e:` syntax.
+# Verify: python -c "import py_compile; py_compile.compile('helper.py', doraise=True)"
+
+subprocess.Popen([
+    "/Applications/PowerVLC.app/Contents/MacOS/PowerVLC",
+    "--play-and-exit",
+    "--no-video-title-show",
+    stream_url,
+])
 ```
 
-### 5. `src/config_defs.hpp` — Define Config Structure
+**⚠ Do NOT use `open -a PowerVLC <url>`** — OS X 10.5 does not forward the URL argument to the app. The binary must be launched directly.
 
-```cpp
-struct Config {
-    // ... existing config ...
-    
-    // NEW: VintageStreamProxy settings
-    string vspServer = "http://localhost:33000";
-    string vspProfile = "default";
-    bool vspAutoOpen = true;
-};
-```
+### 4. VSP Server (`vsp_replacement.py`)
 
-## Communication Challenges
+Python 3 streaming server on port 33000:
 
-### Server → Client Communication
+- **`/direct?v=<id>&height=<res>`** — PowerVLC mode. `height > 360` → remux (DASH muxing); `height <= 360` → Range-forwarding passthrough of progressive format 18.
+- **`/<profile>?v=<id>&resolution=<res>`** — legacy ffmpeg transcode to MPEG-TS (MPlayer fallback).
+- Serves with Range support and **estimated final Content-Length** for scrubbing.
+- In-progress remux registry (`remux_procs` keyed by `(video_id, height)`) prevents restart loops from PowerVLC's repeated Range probes.
 
-The main challenge is sending commands from the Browservice server to the iMac G4 client. Options:
+Key VSP internals (remux mode):
 
-#### Option 1: WebSocket (Recommended)
-
-Add WebSocket support to both Browservice and the client:
-
-```cpp
-// In window.cpp
-void Window::sendVLCCommand(const string& videoId) {
-    if (websocketConnection_) {
-        json msg = {
-            {"type", "vlc_open"},
-            {"videoId", videoId},
-            {"streamUrl", vspServer_ + "/" + vspProfile_ + "?v=" + videoId}
-        };
-        websocketConnection_->send(msg.dump());
-    }
-}
-```
-
-Client-side JavaScript (in main.html):
-
-```javascript
-// Add WebSocket connection
-const ws = new WebSocket('ws://server:port');
-ws.onmessage = function(event) {
-    const msg = JSON.parse(event.data);
-    if (msg.type === 'vlc_open') {
-        // Open VLC with the stream URL
-        window.location.href = 'vlc://' + msg.streamUrl;
-    }
-};
-```
-
-#### Option 2: HTTP Callback
-
-Browservice makes HTTP request to a local service on the iMac G4:
-
-```cpp
-void Window::sendVLCCommand(const string& videoId) {
-    string callbackUrl = "http://localhost:8080/vlc?videoId=" + videoId;
-    
-    // Make HTTP request (using Poco library)
-    try {
-        Poco::Net::HTTPClientSession session("localhost", 8080);
-        Poco::Net::HTTPRequest request(Poco::Net::HTTPRequest::HTTP_GET, 
-                                       "/vlc?videoId=" + videoId);
-        session.sendRequest(request);
-    } catch (exception& e) {
-        ERROR_LOG("Failed to send VLC command: ", e.what());
-    }
-}
-```
-
-#### Option 3: OS Command (Simplest but least secure)
-
-```cpp
-void Window::sendVLCCommand(const string& videoId) {
-    string streamUrl = vspServer_ + "/" + vspProfile_ + "?v=" + videoId;
-    string cmd = "vlc \"" + streamUrl + "\" &";
-    
-    // Execute command (DANGEROUS - only use in trusted environment)
-    system(cmd.c_str());
-}
-```
+- yt-dlp selector MUST force H.264: `bestvideo[height<=N][ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]` — without `[vcodec^=avc1]`, yt-dlp picks AV1 which breaks the Annex B filter.
+- ffmpeg: `ffmpeg -y -i <vurl> -i <aurl> -c copy -bsf:v h264_mp4toannexb -f mpegts -max_muxing_queue_size 1024 <out>.ts` — `-bsf:v h264_mp4toannexb` is REQUIRED (MP4 length-prefixed framing → MPEG-TS start-code framing).
 
 ## Build Instructions
 
-### Prerequisites
-
 ```bash
-# macOS
-brew install cmake poco cef zlib libjpeg-turbo pango freetype2
-
-# Ubuntu/Debian
-sudo apt install cmake libpoco-dev libcef-dev zlib1g-dev libjpeg-turbo8-dev libpango1.0-dev libfreetype6-dev
+# On the Linux box, after any src/*.cpp change:
+cd ~/browservice
+make -j4
+# Restart the service (kills any active stream — warn the user first!)
+sudo systemctl restart browservice
 ```
 
-### Build
+## Communication Flow
 
-```bash
-cd browservice
-mkdir build && cd build
-cmake ..
-make -j$(nproc)
+Browservice never talks to PowerVLC directly. It talks to the **helper** on the iMac over HTTP; the helper launches PowerVLC; PowerVLC talks to **VSP** over HTTP Range requests.
+
+```
+Browservice (Linux) ──HTTP──> helper (iMac, :9999) ──launch──> PowerVLC (iMac)
+PowerVLC ──HTTP Range──> VSP (Linux, :33000) ──HTTP 206──> YouTube CDN
 ```
 
-### Test
+## Gotchas (all hit in production)
 
-```bash
-./browservice --vsp-server http://localhost:33000 --vsp-profile default
-```
-
-## Security Considerations
-
-1. **Command injection** — Never pass user input directly to `system()`
-2. **Network exposure** — Only listen on localhost or trusted network
-3. **File scheme blocking** — Keep `--block-file-scheme` enabled
-4. **Certificate verification** — Keep TLS verification enabled
-
-## Alternative: JavaScript Injection
-
-Instead of modifying C++, inject JavaScript into the Chromium instance:
-
-```cpp
-// In OnAfterCreated or similar
-void Window::injectYouTubeDetector() {
-    string js = R"(
-        // Monitor navigation
-        const observer = new MutationObserver(function(mutations) {
-            const url = window.location.href;
-            if (url.includes('youtube.com/watch') || url.includes('youtu.be/')) {
-                const match = url.match(/v=([a-zA-Z0-9_-]{11})/);
-                if (match) {
-                    // Send message to server
-                    fetch('/api/vlc?videoId=' + match[1]);
-                }
-            }
-        });
-        
-        observer.observe(document, { childList: true, subtree: true });
-    )";
-    
-    browser_->GetMainFrame()->ExecuteJavaScript(js, "about:blank", 0);
-}
-```
+1. **TWO URL-building sites in `src/window.cpp`** — red play button (~line 656) AND manual VLC launch (~line 1429). Both must emit `/direct`.
+2. **Default resolution lives in TWO places**: `window.cpp` `currentTranscodeResolutionIdx` AND `vsp_replacement.py` `DEFAULT_PROFILE`. Change both together (current default: 480p).
+3. **`open -a PowerVLC <url>` opens but never plays** on OS X 10.5 — launch the binary directly with VLC args.
+4. **Helper is Python 2.5**: ASCII-only source, print statements, `except Exception, e:`.
+5. **`pkill -f vsp_replacement.py` often does NOT kill it** (setsid'd from ssh) — kill by explicit PID.
+6. **Remux HTTP 500 "Remux produced no data"** — AV1 stream selected (fix: `[vcodec^=avc1]`) or missing `-bsf:v h264_mp4toannexb`.
+7. **Timeline shows only a few seconds** — VSP sent current growing-file size as Content-Length; must send estimated final size.
+8. **Stream dies during first play** — remux restart loop; fixed by the `remux_procs` registry; never `proc.terminate()` on client disconnect.
+9. **Restarting VSP kills the active stream** — warn the user before deploying mid-session.
 
 ## Status
 
-- [ ] YouTube URL detection
-- [ ] Video ID extraction
-- [ ] Server → client communication
-- [ ] VLC launching
-- [ ] Configuration options
-- [ ] Error handling
-- [ ] Testing on iMac G4
+- [x] YouTube URL detection
+- [x] Video ID extraction
+- [x] Server → client communication (HTTP helper on iMac)
+- [x] PowerVLC launching (direct binary + args)
+- [x] Configuration options (--vlc-*, --vsp-*)
+- [x] Direct passthrough streaming (format 18, Range)
+- [x] Remux mode (480p/720p DASH muxing)
+- [x] Full-timeline scrubbing (estimated Content-Length)
+- [x] Persistent sessions (--data-dir)
+- [x] Tested on iMac G4
 
 ## Contributing
 
-If you implement this modification, please consider submitting a pull request to the Browservice repository. The maintainer has indicated openness to alternative vice plugins, so this could potentially be implemented as a separate plugin rather than a core modification.
+The streaming integration is implemented as a set of modifications to the open-source [Browservice](https://github.com/ttalvitie/browservice) codebase, plus the standalone `vsp_replacement.py` server and the iMac `helper.py`. The upstream maintainer has indicated openness to alternative vice plugins; a plugin-based approach could replace the C++ modifications in the future.

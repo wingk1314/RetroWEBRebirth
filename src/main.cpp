@@ -80,6 +80,8 @@ public:
         }
 
         commandLine->AppendSwitch("disable-smooth-scrolling");
+        // Block video autoplay on all sites (requires user click to play)
+        commandLine->AppendSwitchWithValue("autoplay-policy", "user-gesture-required");
 
         // On Linux, use ANGLE/SwiftShader by maximize compatibility. On Windows, the Chromium
         // default should be reliable.
@@ -112,11 +114,12 @@ public:
         REQUIRE_UI_THREAD();
         REQUIRE(!server_);
 
-        CefRefPtr<BrowserviceSchemeHandlerFactory> schemeHandlerFactory = new BrowserviceSchemeHandlerFactory();
-        CefRegisterSchemeHandlerFactory("browservice", "", schemeHandlerFactory);
-
         CefRefPtr<CefRequestContext> requestContext = CefRequestContext::CreateContext(requestContextSettings_, nullptr);
         REQUIRE(requestContext);
+
+        // Register scheme handler on the custom request context (not globally)
+        CefRefPtr<BrowserviceSchemeHandlerFactory> schemeHandlerFactory = new BrowserviceSchemeHandlerFactory();
+        requestContext->RegisterSchemeHandlerFactory("browservice", "", schemeHandlerFactory);
 
         server_ = Server::create(serverEventHandler_, viceCtx_, requestContext);
         viceCtx_.reset();

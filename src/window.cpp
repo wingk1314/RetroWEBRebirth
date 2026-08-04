@@ -41,18 +41,36 @@ string toLowerASCII(string s) {
 // The per-Client vlcNotificationPageSignKey_ remains for in-window fallback.
 string vlcNotificationSignKey = generateDataURLSignKey();
 
-// Transcoding resolution options for VSP
-const vector<string> transcodeResolutions = {"144p", "240p", "360p", "480p", "720p"};
-int currentTranscodeResolutionIdx = 3; // Default: 480p
+// Direct mode: passthrough only (144p/240p/360p via format 18, no server work)
+const vector<string> directResolutions = {"144p", "240p", "360p"};
+// Legacy mode: remux via /profile (480p/720p, ffmpeg DASH muxing)
+const vector<string> legacyResolutions = {"480p", "720p"};
+
+enum StreamMode { StreamDirect, StreamLegacy };
+StreamMode currentStreamMode = StreamLegacy;
+int currentResIdx = 0; // 0=480p (default), 1=720p
 
 string getCurrentTranscodeResolution() {
-    return transcodeResolutions[currentTranscodeResolutionIdx];
+    const auto& res = (currentStreamMode == StreamDirect) ? directResolutions : legacyResolutions;
+    return res[currentResIdx];
 }
 
+string getResolutionDisplayText() {
+    string prefix = (currentStreamMode == StreamDirect) ? "D:" : "L:";
+    return prefix + getCurrentTranscodeResolution();
+}
+
+// Cycle: D:144p -> D:240p -> D:360p -> L:480p -> L:720p -> D:144p (wrap)
 void cycleTranscodeResolution() {
-    currentTranscodeResolutionIdx =
-        (currentTranscodeResolutionIdx + 1) % transcodeResolutions.size();
-    INFO_LOG("Transcode resolution changed to ", getCurrentTranscodeResolution());
+    const auto& res = (currentStreamMode == StreamDirect) ? directResolutions : legacyResolutions;
+    currentResIdx++;
+    if(currentResIdx >= (int)res.size()) {
+        currentResIdx = 0;
+        currentStreamMode = (currentStreamMode == StreamDirect) ? StreamLegacy : StreamDirect;
+        INFO_LOG("Stream mode changed to ",
+                 (currentStreamMode == StreamDirect ? "Direct" : "Legacy"));
+    }
+    INFO_LOG("Resolution changed to ", getResolutionDisplayText());
 }
 
 // Detect YouTube video URLs. Works with www./m. prefixes and case-insensitively.
@@ -664,15 +682,22 @@ public:
                     return false;
                 }
 
-                // Build VSP stream URL (direct passthrough mode for PowerVLC)
+                // Build VSP stream URL — mode determines /direct vs /profile
                 string vspServer = globals->config->vspServer;
                 if(!vspServer.empty() && vspServer.back() == '/') {
                     vspServer.pop_back();
                 }
                 string resolution = getCurrentTranscodeResolution();
-                string streamUrl = vspServer + "/direct"
-                                 + "?v=" + videoID.value()
-                                 + "&height=" + resolution;
+                string streamUrl;
+                if(currentStreamMode == StreamDirect) {
+                    streamUrl = vspServer + "/direct"
+                              + "?v=" + videoID.value()
+                              + "&height=" + resolution;
+                } else {
+                    streamUrl = vspServer + "/" + globals->config->vspProfile
+                              + "?v=" + videoID.value()
+                              + "&resolution=" + resolution;
+                }
                 string encodedStreamUrl = CefURIEncode(streamUrl, false);
 
                 // Build helper URL with timeout
@@ -1368,8 +1393,8 @@ void Window::onResolutionButtonPressed() {
 
     if(state_ == Open) {
         cycleTranscodeResolution();
-        // Update the control bar text display
-        rootWidget_->controlBar()->setResolutionText(getCurrentTranscodeResolution());
+        // Update the control bar text display (includes mode prefix)
+        rootWidget_->controlBar()->setResolutionText(getResolutionDisplayText());
     }
 }
 
@@ -1421,19 +1446,26 @@ void Window::sendCurrentURLToVLC() {
         vspServer.pop_back();
     }
 
-    // Build stream URL (direct passthrough mode for PowerVLC):
-    // try YouTube video ID first, otherwise pass full URL
+    // Build stream URL — mode determines /direct vs /profile
     string streamUrl;
     string resolution = getCurrentTranscodeResolution();
     optional<string> videoID = extractYouTubeVideoID(url);
     if(videoID.has_value()) {
-        streamUrl = vspServer + "/direct"
-                  + "?v=" + videoID.value()
-                  + "&height=" + resolution;
-        INFO_LOG("Manual VLC: YouTube video ", videoID.value(),
-                 " at ", resolution);
+        if(currentStreamMode == StreamDirect) {
+            streamUrl = vspServer + "/direct"
+                      + "?v=" + videoID.value()
+                      + "&height=" + resolution;
+            INFO_LOG("Manual VLC: YouTube video ", videoID.value(),
+                     " at ", resolution, " (direct)");
+        } else {
+            streamUrl = vspServer + "/" + globals->config->vspProfile
+                      + "?v=" + videoID.value()
+                      + "&resolution=" + resolution;
+            INFO_LOG("Manual VLC: YouTube video ", videoID.value(),
+                     " at ", resolution, " (legacy)");
+        }
     } else {
-        // Pass the full URL to VSP for non-YouTube sites (legacy transcode)
+        // Non-YouTube URLs always use legacy profile mode
         streamUrl = vspServer + "/" + globals->config->vspProfile
                   + "?url=" + string(CefURIEncode(url, false).ToString())
                   + "&resolution=" + resolution;

@@ -101,6 +101,9 @@ CefRefPtr<CefResourceHandler> BrowserviceSchemeHandlerFactory::Create(
     CEF_REQUIRE_IO_THREAD();
     REQUIRE(request);
 
+    string reqUrl = string(request->GetURL());
+    INFO_LOG("SchemeHandler called: ", reqUrl.substr(0, 100));
+
     int status = 404;
     string statusText = "Not Found";
     string response =

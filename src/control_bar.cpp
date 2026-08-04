@@ -1618,5 +1618,4 @@ vector<shared_ptr<Widget>> ControlBar::widgetListChildren_() {
     }
     return children;
 }
-
 }
