@@ -42,3 +42,7 @@ data/
 __pycache__/
 *.bak
 start_browservice.sh
+
+# rfbvice test binaries
+viceplugins/rfbvice/test/frame_diff_test
+viceplugins/rfbvice/test/e2e_test

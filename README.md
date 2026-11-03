@@ -66,6 +66,10 @@ Browservice renders modern web pages (like YouTube) on a Linux server using Chro
 - Direct mode ≤360p streams YouTube's progressive format 18 with zero transcoding.
 - Legacy mode 480p/720p uses ffmpeg `-c copy` (no re-encode): `bestvideo[height<=N][ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]` → `-bsf:v h264_mp4toannexb -f mpegts`.
 
+## Optional: VNC front end (rfbvice)
+
+Instead of streaming full frames to Safari, Browservice can serve the browser over VNC with the `rfbvice` plugin. It sends only the screen tiles that changed, turns scrolling into a cheap CopyRect, and keeps one open connection. On the iMac, use Leopard's Screen Sharing (`vnc://SERVER_IP:5900`) or Chicken of the VNC. Build it with `make rfbvice` and see [viceplugins/rfbvice/README.md](viceplugins/rfbvice/README.md).
+
 ## Setup
 
 ### Prerequisites
