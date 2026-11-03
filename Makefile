@@ -15,7 +15,7 @@ CEFFILES_OUT_$(1) := $(addprefix $(1)/bin/,$(notdir $(CEFFILES_IN)))
 endef
 $(foreach b,debug release,$(eval $(call OUTDEFS,$(b))))
 
-.PHONY: debug release clean default FORCE
+.PHONY: debug release clean default FORCE rfbvice rfbvice-debug
 
 default: release
 
@@ -69,8 +69,29 @@ viceplugins/retrojsvice/release/lib/retrojsvice.so: FORCE
 viceplugins/retrojsvice/debug/lib/retrojsvice.so: FORCE
 	$(MAKE) -C viceplugins/retrojsvice debug
 
+# Optional VNC vice plugin (needs libvncserver-dev): `make rfbvice`, then run
+# browservice with --vice-plugin=rfbvice.so. See viceplugins/rfbvice/README.md.
+rfbvice: release/bin/rfbvice.so
+
+rfbvice-debug: debug/bin/rfbvice.so
+
+release/bin/rfbvice.so: viceplugins/rfbvice/release/lib/rfbvice.so
+	@mkdir -p release/bin
+	cp $< $@
+
+debug/bin/rfbvice.so: viceplugins/rfbvice/debug/lib/rfbvice.so
+	@mkdir -p debug/bin
+	cp $< $@
+
+viceplugins/rfbvice/release/lib/rfbvice.so: FORCE
+	$(MAKE) -C viceplugins/rfbvice release
+
+viceplugins/rfbvice/debug/lib/rfbvice.so: FORCE
+	$(MAKE) -C viceplugins/rfbvice debug
+
 clean:
-	rm -rf $(OBJS_debug) $(OBJS_release) $(DEPS_debug) $(DEPS_release) debug/bin/browservice release/bin/browservice debug/bin/retrojsvice.so release/bin/retrojsvice.so $(CEFFILES_OUT_debug) $(CEFFILES_OUT_release)
+	rm -rf $(OBJS_debug) $(OBJS_release) $(DEPS_debug) $(DEPS_release) debug/bin/browservice release/bin/browservice debug/bin/retrojsvice.so release/bin/retrojsvice.so debug/bin/rfbvice.so release/bin/rfbvice.so $(CEFFILES_OUT_debug) $(CEFFILES_OUT_release)
 	$(MAKE) -C viceplugins/retrojsvice clean
+	$(MAKE) -C viceplugins/rfbvice clean
 
 -include $(DEPS_debug) $(DEPS_release)
